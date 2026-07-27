@@ -1,0 +1,9 @@
+# Gradle
+target/
+build/
+generated/
+gradle-app.setting
+.gradle
+.gradletasknamecache
+!gradle-wrapper.jar
+**/build/

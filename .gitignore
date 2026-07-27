@@ -1,0 +1,22 @@
+# IntelliJ
+out/
+.idea/
+.idea_modules/
+*.iws
+*.iml
+
+# Eclipse
+.settings/
+.classpath
+.checkstyle
+.project
+
+# Misc
+hs_err_pid*
+*.log
+*.ctxt
+*.jar
+tmp/
+
+# IntelliJ
+lib/

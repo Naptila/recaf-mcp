@@ -1,0 +1,148 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin:
+    name: Plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    defaults:
+      run:
+        working-directory: recaf-mcp-plugin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+          cache-dependency-path: |
+            recaf-mcp-plugin/*.gradle
+            recaf-mcp-plugin/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Build and test plugin
+        if: runner.os != 'Windows'
+        run: ./gradlew clean build --no-daemon
+
+      - name: Build and test plugin
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat clean build --no-daemon
+
+      - name: Upload plugin JAR
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recaf-mcp-plugin
+          path: recaf-mcp-plugin/build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 14
+
+  bridge:
+    name: Bridge (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    defaults:
+      run:
+        working-directory: recaf-mcp-bridge
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.2
+        with:
+          version: "0.11.25"
+          python-version: "3.11"
+          working-directory: recaf-mcp-bridge
+          enable-cache: true
+          cache-dependency-glob: recaf-mcp-bridge/uv.lock
+
+      - name: Install locked environment
+        run: uv sync --frozen
+
+      - name: Test bridge
+        run: uv run --frozen pytest -q
+
+      - name: Build and install bridge distributions
+        if: runner.os == 'Linux'
+        run: |
+          uv build --out-dir dist
+          uv tool install --force dist/recaf_mcp_bridge-*.whl
+          uv tool list
+
+      - name: Upload bridge distributions
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recaf-mcp-bridge
+          path: |
+            recaf-mcp-bridge/dist/*.whl
+            recaf-mcp-bridge/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    needs:
+      - plugin
+      - bridge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download plugin JAR
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: recaf-mcp-plugin
+          path: release
+
+      - name: Download bridge distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: recaf-mcp-bridge
+          path: release
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

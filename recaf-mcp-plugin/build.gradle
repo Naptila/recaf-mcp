@@ -1,0 +1,191 @@
+import java.util.zip.ZipFile
+
+plugins {
+    id 'java'
+    id 'org.openjfx.javafxplugin' version '0.1.0'
+}
+
+group = 'me.naptila'
+version = '1.0.0'
+
+ext {
+    // The version of Recaf we're building against.
+    //
+    // For Recaf versions:
+    //  - Releases: https://mvnrepository.com/artifact/software.coley/recaf-core
+    //  - Snapshots: https://jitpack.io/#Col-E/Recaf  (see commits tab)
+    recafVersion = 'cc1676ce7b'
+    recafSnapshots = true
+
+    // This should point to the full name of the class that 'implements Plugin'
+    pluginMainClass = 'me.naptila.recafmcp.RecafMCPPlugin'
+}
+
+// Recaf requires JDK 22 or higher.
+// We'll use this toolchain declaration to force the version of Java this project builds with.
+// If your main JDK is 22+ you won't need any additional setup.
+//
+// See: https://docs.gradle.org/current/userguide/toolchains.html
+//   gradlew -q javaToolchains - see the list of detected toolchains.
+//
+// If you wish to keep your main JDK as something else I suggest you create a "toolchains.xml"
+// in your '${user.home}/.m2/' directory. You can see an example over at:
+//  https://maven.apache.org/guides/mini/guide-using-toolchains.html
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    sourceCompatibility = JavaVersion.VERSION_22
+    targetCompatibility = JavaVersion.VERSION_22
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+
+    // For Recaf snapshot builds a few transitive dependencies
+    maven { url 'https://jitpack.io' }
+}
+
+configurations.configureEach {
+    // Annoying annotations that replace desired tab completions.
+    exclude group: 'org.checkerframework'
+
+    // Other annotations we don't use which are transitive deps of deps
+    exclude group: 'com.google.code.findbugs'
+    exclude group: 'com.google.errorprone'
+    exclude group: 'com.google.j2objc'
+    exclude group: 'org.jetbrains', module: 'annotations'
+
+    // Transitive dependencies that we want to ignore (less to download, less repositories to connect to)
+    exclude group: 'com.android.tools'
+
+    // Used by ANTLR runtime, has a lot of IL8N related files which we don't use.
+    // Removing this dependency doesn't inhibit the behavior of libraries using the
+    // runtime in practice though.
+    exclude group: 'com.ibm.icu'
+}
+
+configurations {
+    recafHeadlessRuntime {
+        canBeConsumed = false
+        canBeResolved = true
+        visible = false
+    }
+}
+
+dependencies {
+    if (recafSnapshots) {
+        implementation "com.github.Col-E.Recaf:recaf-core:${recafVersion}"
+        runtimeOnly "com.github.Col-E.Recaf:recaf-ui:${recafVersion}"
+        recafHeadlessRuntime "com.github.Col-E.Recaf:recaf-core:${recafVersion}"
+    } else {
+        implementation "software.coley:recaf-core:${recafVersion}"
+        runtimeOnly "software.coley:recaf-ui:${recafVersion}"
+        recafHeadlessRuntime "software.coley:recaf-core:${recafVersion}"
+    }
+
+    testImplementation platform('org.junit:junit-bom:5.11.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+// We include the JavaFX plugin to allow you to quickly run Recaf from this project.
+javafx {
+    version = '22.0.1'
+    modules = [ 'javafx.base', 'javafx.graphics', 'javafx.controls', 'javafx.media' ]
+}
+
+// This dirty hack of a task creates the service entry in the output jar.
+// Recaf expects the service entry to be the full name of the class that implements the 'Plugin' interface
+tasks.register('setupServiceEntry') {
+    outputs.dir(temporaryDir)
+
+    doFirst {
+        new File(temporaryDir, "META-INF/services").mkdirs()
+        new File(temporaryDir, "META-INF/services/software.coley.recaf.plugin.Plugin").text = project.ext.pluginMainClass
+    }
+}
+jar {
+    from(setupServiceEntry)
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+// Because all of the necessary dependencies to run Recaf are on the classpath we can make
+// a simple task to run Recaf. We'll have it build our plugin and load it up on startup.
+tasks.register('runRecaf', JavaExec) {
+    // Need to build the plugin jar first
+    dependsOn 'build'
+
+    // Recaf and its dependencies only. The plugin itself must be loaded solely
+    // through '-r' so its classes cannot leak into Recaf's parent classloader.
+    classpath configurations.runtimeClasspath
+    mainClass = "software.coley.recaf.Main"
+
+    // Add our plugin
+    args("-r", "build/libs")
+}
+
+tasks.register('runRecafHeadless', JavaExec) {
+    // Need to build the plugin jar first
+    dependsOn 'build'
+
+    // Recaf and its dependencies only. The plugin itself must be loaded solely
+    // through '-r' so its classes cannot leak into Recaf's parent classloader.
+    classpath configurations.recafHeadlessRuntime
+    mainClass = "software.coley.recaf.Main"
+
+    // Keep headless runs isolated from the user's normal Recaf plugins and config.
+    def recafDataDir = System.getProperty(
+            "recaf.dataDir",
+            file("$buildDir/recaf-data/headless").absolutePath
+    )
+    args("-d", recafDataDir)
+
+    // Add our plugin
+    args("-r", "build/libs")
+    args("--headless")
+    args("--idle")
+
+    def inputPath = System.getProperty("recaf.input")
+    if (inputPath != null) {
+        args("-i", inputPath)
+    }
+
+    systemProperty("recaf.mcp.port", System.getProperty("recaf.mcp.port", "0"))
+}
+
+tasks.register('verifyPluginJar') {
+    dependsOn 'jar'
+
+    doLast {
+        File pluginJar = tasks.named('jar').get().archiveFile.get().asFile
+        new ZipFile(pluginJar).withCloseable { ZipFile zip ->
+            String servicePath = 'META-INF/services/software.coley.recaf.plugin.Plugin'
+            def serviceEntry = zip.getEntry(servicePath)
+            if (serviceEntry == null)
+                throw new GradleException('Worker plugin service entry is missing')
+            String serviceValue = zip.getInputStream(serviceEntry).getText('UTF-8').trim()
+            if (serviceValue != pluginMainClass)
+                throw new GradleException('Worker plugin service entry is invalid')
+
+            boolean containsRecaf = zip.entries().find { entry ->
+                entry.name.startsWith('software/coley/recaf/')
+            } != null
+            boolean containsGson = zip.entries().find { entry ->
+                entry.name.startsWith('com/google/gson/')
+            } != null
+            if (containsRecaf || containsGson)
+                throw new GradleException('Worker plugin must not shade Recaf runtime dependencies')
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn 'verifyPluginJar'
+}

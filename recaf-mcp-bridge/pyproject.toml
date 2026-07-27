@@ -1,0 +1,46 @@
+[project]
+name = "recaf-mcp-bridge"
+version = "1.0.0"
+description = "Client-neutral MCP stdio bridge for headless Recaf workers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "anyio>=4.4,<5",
+    "httpx>=0.27,<1",
+    "mcp>=1.27,<2",
+]
+
+[project.scripts]
+recaf-mcp-bridge = "main:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = [
+    "application",
+    "config",
+    "discovery",
+    "launcher",
+    "main",
+    "proxy",
+    "recovery",
+    "results",
+    "schema",
+    "server",
+    "sessions",
+    "tools",
+    "watchdog",
+    "worker",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
