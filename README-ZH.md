@@ -37,9 +37,33 @@ Recaf，也无需发布 Python 包。
 - Python 3.11 或更高版本。
 - [`uv`](https://docs.astral.sh/uv/)，用于桥接器的锁定依赖环境。
 
-## 构建与安装
+## 安装
 
-构建插件，将其复制到 Recaf 插件目录，然后直接从本仓库安装桥接器：
+### 从 Release 安装（推荐）
+
+无需检出源码或在本地构建项目。从
+[最新 GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
+下载
+[`recaf-mcp-plugin-1.0.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf-mcp-plugin-1.0.0.jar)，
+并将其复制到 Recaf 插件目录：
+
+| 平台 | Recaf 插件目录 |
+| --- | --- |
+| Linux | `~/.config/Recaf/plugins` |
+| macOS | `~/Library/Application Support/Recaf/plugins` |
+| Windows | `%APPDATA%\Recaf\plugins` |
+
+直接从同一个 Release 安装跨平台 Bridge wheel：
+
+```bash
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf_mcp_bridge-1.0.0-py3-none-any.whl
+```
+
+该命令会安装 `recaf-mcp-bridge`，项目本身无需发布到 PyPI。
+
+### 从源码构建
+
+如果需要自行构建插件并从本地源码安装 Bridge：
 
 ```bash
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
@@ -50,24 +74,7 @@ cd ..
 uv tool install ./recaf-mcp-bridge
 ```
 
-也可以从成功的 **Build** workflow 中下载两个 artifact：
-
-| Artifact | 用途 |
-| --- | --- |
-| `recaf-mcp-plugin` | 解压后将 JAR 复制到 Recaf 插件目录 |
-| `recaf-mcp-bridge` | 解压后执行 `uv tool install /absolute/path/to/recaf_mcp_bridge-1.0.0-py3-none-any.whl` 安装 wheel |
-
-wheel 安装得到的同样是 `recaf-mcp-bridge` 命令。桥接器本身不会从 PyPI
-下载，也不需要发布到 PyPI。
-
-| 平台 | Recaf 插件目录 |
-| --- | --- |
-| Linux | `~/.config/Recaf/plugins` |
-| macOS | `~/Library/Application Support/Recaf/plugins` |
-| Windows | `%APPDATA%\Recaf\plugins` |
-
-如果插件已经是最新版本，只需重新运行 `uv tool install
-./recaf-mcp-bridge`。将 `RECAF_JAR` 指向下载的通用可执行 JAR：
+使用任一方式完成安装后，将 `RECAF_JAR` 指向下载的通用可执行 JAR：
 
 ```text
 RECAF_JAR=/absolute/path/to/recaf.jar

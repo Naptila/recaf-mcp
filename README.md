@@ -39,10 +39,33 @@ dynamic tool-list support. The complete tool catalog is shown below.
 - Python 3.11 or newer.
 - [`uv`](https://docs.astral.sh/uv/) for the locked Bridge environment.
 
-## Build and install
+## Install
 
-Build the plugin, copy it to Recaf's plugin directory, then install the Bridge
-directly from this checkout:
+### Install from a Release (recommended)
+
+No source checkout or local build is required. Download the
+[`recaf-mcp-plugin-1.0.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf-mcp-plugin-1.0.0.jar)
+asset from the [latest GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
+and copy it into Recaf's plugin directory:
+
+| Platform | Recaf plugin directory |
+| --- | --- |
+| Linux | `~/.config/Recaf/plugins` |
+| macOS | `~/Library/Application Support/Recaf/plugins` |
+| Windows | `%APPDATA%\Recaf\plugins` |
+
+Install the cross-platform Bridge wheel directly from the same Release:
+
+```bash
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf_mcp_bridge-1.0.0-py3-none-any.whl
+```
+
+This installs the `recaf-mcp-bridge` command without publishing the project to
+PyPI.
+
+### Build from source
+
+To build the plugin and install the Bridge from a checkout instead:
 
 ```bash
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
@@ -53,25 +76,8 @@ cd ..
 uv tool install ./recaf-mcp-bridge
 ```
 
-Alternatively, download the two artifacts from a successful **Build** workflow
-run:
-
-| Artifact | Use |
-| --- | --- |
-| `recaf-mcp-plugin` | Extract and copy the JAR to Recaf's plugin directory |
-| `recaf-mcp-bridge` | Extract and install the wheel with `uv tool install /absolute/path/to/recaf_mcp_bridge-1.0.0-py3-none-any.whl` |
-
-The wheel installs the same `recaf-mcp-bridge` command as the local checkout.
-The Bridge itself is not fetched from or published to PyPI.
-
-| Platform | Recaf plugin directory |
-| --- | --- |
-| Linux | `~/.config/Recaf/plugins` |
-| macOS | `~/Library/Application Support/Recaf/plugins` |
-| Windows | `%APPDATA%\Recaf\plugins` |
-
-If the plugin is already current, only rerun `uv tool install
-./recaf-mcp-bridge`. Set `RECAF_JAR` to the downloaded generic executable JAR:
+After installing by either method, set `RECAF_JAR` to the downloaded generic
+executable JAR:
 
 ```text
 RECAF_JAR=/absolute/path/to/recaf.jar

@@ -14,18 +14,17 @@ does not depend on optional client support for catalog-change notifications.
 
 ## Install
 
-Python 3.11 or newer and `uv` are required. Install directly from the local
-repository root; publishing the package is not required:
+Python 3.11 or newer and `uv` are required. Install the cross-platform wheel
+directly from GitHub without a checkout or local build:
+
+```bash
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf_mcp_bridge-1.0.0-py3-none-any.whl
+```
+
+To install from a local source checkout instead:
 
 ```bash
 uv tool install ./recaf-mcp-bridge
-```
-
-The `recaf-mcp-bridge` artifact from a successful root **Build** workflow can
-be installed without a checkout after extracting it:
-
-```bash
-uv tool install /absolute/path/to/recaf_mcp_bridge-1.0.0-py3-none-any.whl
 ```
 
 Runtime dependencies have major-version upper bounds. The committed `uv.lock`
