@@ -35,6 +35,10 @@ public final class HealthHandler {
         result.addProperty("ready", health.isReady() && !closing);
         result.addProperty("workspace_open", health.isWorkspaceOpen());
         result.addProperty("workspace_ready", health.isWorkspaceReady());
+        result.addProperty(
+                "workspace_archive_export_supported",
+                health.isWorkspaceArchiveExportSupported()
+        );
         result.addProperty("busy", operationCoordinator.isBusy());
         result.addProperty("closing", closing);
         addNullableString(result, "expected_input_path", health.getExpectedInputPath());

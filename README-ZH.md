@@ -25,7 +25,7 @@ Recaf，也无需发布 Python 包。
 | 修改 JVM | 编译替换 Java 源码、运行安全的 Recaf 转换、编辑指定方法的指令 |
 | 分析 APK/DEX | Android 类、解码后的二进制 XML、DEX 字符串/指令/成员/调用，以及重建的单类 DEX |
 | 自动化 | 编译并运行与当前 Recaf 版本匹配的 Java 脚本，用于自定义反混淆 |
-| 会话管理 | 多个隔离 Worker、保存/重新打开、空闲自动保存、取消、清理和恢复 |
+| 会话管理 | 多个隔离 Worker、JAR 保存/重新打开、按格式处理空闲清理、取消和恢复 |
 
 全部 26 个工具都会在打开目标之前公布，因此客户端无需支持动态工具列表。完整工具目录见下文。
 
@@ -125,11 +125,12 @@ RECAF_JAR="$RECAF_JAR" recaf-mcp-bridge --stdio
 | 3 | `workspace_info(database=...)` | 汇总已加载的目标 |
 | 4 | `list_classes(database=...)` 或其他分析工具 | 开始分析 |
 | 5 | `recaf_save(database=..., output_path=...)` | 写出修改后的 JAR |
-| 6 | `recaf_close(database=..., save=false)` | 关闭且不保存 |
+| 6 | `recaf_close(database=...)` | 保存 JAR，或关闭 APK/DEX 且不导出 |
 
 所有生命周期路径都必须是绝对路径。每次调用 Worker 工具时都要传入返回的
-`database`。`recaf_close` 默认保存 JAR 修改；如需丢弃修改，请使用
-`save=false`，APK 会话则始终使用该参数。
+`database`。省略 `save` 时，`recaf_close` 会保存 JAR 修改，但关闭 APK/DEX
+会话时不会导出 JAR。如需丢弃 JAR 修改，请使用 `save=false`；Android 归档保存
+请求会被明确拒绝。
 
 ## 配置
 
@@ -146,7 +147,7 @@ MCP 客户端通常只需设置 `RECAF_JAR`。桥接器会在 Recaf 的标准插
 | `RECAF_JAVA_COMMAND` | `java` | Worker 使用的 JDK 可执行文件 |
 | `RECAF_MAX_SESSIONS` | `2` | 并发等待/就绪 Worker 上限，取值 1–32 |
 | `RECAF_WORKER_MAX_HEAP_MB` | `1024` | 每个 Worker 的最大堆，至少 128 MiB |
-| `RECAF_IDLE_TTL_SEC` | `600` | 默认空闲自动保存/关闭时间；`0` 表示禁用 |
+| `RECAF_IDLE_TTL_SEC` | `600` | 空闲清理时间：自动保存 JAR，关闭 APK/DEX 但不导出；`0` 表示禁用 |
 | `RECAF_RESPONSE_PROFILE` | `compact` | `compact` 避免重复 JSON 文本；`legacy` 恢复重复文本 |
 | `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | 等待 Worker 启动就绪的超时时间 |
 | `RECAF_SESSION_ROOT` | 系统临时目录 | 仅所有者可访问的实时会话目录 |
@@ -167,11 +168,11 @@ MCP 客户端通常只需设置 `RECAF_JAR`。桥接器会在 Recaf 的标准插
 
 | 工具 | 用途 | 关键行为 |
 | --- | --- | --- |
-| `recaf_open` | 打开 JAR 或 APK | 输入必须是绝对路径；返回 `database` |
+| `recaf_open` | 打开 JAR 或 APK | 返回 `database`、保存能力和可为空的自动保存路径 |
 | `recaf_list` | 列出已打开的会话 | 可用于安全检查安装是否正常 |
-| `set_idle_ttl` | 修改空闲超时 | `0` 表示禁用空闲自动保存/关闭 |
+| `set_idle_ttl` | 修改空闲超时 | `0` 表示禁用自动空闲清理 |
 | `recaf_save` | 导出修改后的 JAR | 原子写入；不支持保存 APK/DEX |
-| `recaf_close` | 关闭会话 | 默认保存 JAR；使用 `save=false` 丢弃修改 |
+| `recaf_close` | 关闭会话 | 省略 `save` 时保存 JAR，且绝不导出 APK/DEX |
 
 ### 浏览与反编译
 
@@ -248,7 +249,7 @@ MCP 客户端通常只需设置 `RECAF_JAR`。桥接器会在 Recaf 的标准插
 | 主题 | 规则 |
 | --- | --- |
 | JAR 修改 | 修改保留在内存中，直到调用 `recaf_save` 或会保存的 `recaf_close` |
-| APK 会话 | 仅支持分析和内存映射；使用 `save=false` 关闭 |
+| APK 会话 | 仅支持分析和内存映射；不会创建自动保存路径，默认关闭、空闲清理和 Bridge 退出都不会导出 JAR |
 | `read_file` | 只读取当前归档中的准确条目，绝不读取任意主机路径 |
 | `export_sources` | 要求绝对输出路径，并以原子方式安装经过验证的 ZIP |
 | Recaf 脚本 | 拥有完整的 Worker 文件系统/网络/进程权限，且不具备事务性 |
@@ -270,7 +271,7 @@ uv run pytest -q
 ```
 
 可选启用的真实环境测试套件还会启动已安装的 Recaf Worker，覆盖打开、分析、修改、
-分页读取、保存、重新打开、取消清理、空闲关闭、信号清理以及带身份验证的恢复流程。
+分页读取、保存、重新打开、取消清理、按格式处理空闲/退出清理以及带身份验证的恢复流程。
 
 ## 故障排除
 

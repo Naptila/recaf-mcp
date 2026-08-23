@@ -18,11 +18,24 @@ class WorkerHealthTest {
 
         assertFalse(health.isReady());
         workspaceOpen.set(true);
-        health.markWorkspaceReady("/input.jar");
+        health.markWorkspaceReady("/input.jar", true);
 
         assertTrue(health.isReady());
         assertTrue(health.isWorkspaceReady());
+        assertTrue(health.isWorkspaceArchiveExportSupported());
         assertEquals("/input.jar", health.getActualInputPath());
+    }
+
+    @Test
+    void reportsAndroidWorkspaceArchiveExportAsUnsupported() {
+        WorkerHealth health = new WorkerHealth(
+                () -> true, "/input.apk", "1.0.0", "4.0.0", "commit");
+
+        health.markWorkspaceReady("/input.apk", false);
+
+        assertTrue(health.isReady());
+        assertTrue(health.isWorkspaceReady());
+        assertFalse(health.isWorkspaceArchiveExportSupported());
     }
 
     @Test

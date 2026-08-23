@@ -105,6 +105,7 @@ class McpRequestHandlerTest {
         assertTrue(result.get("ready").getAsBoolean());
         assertFalse(result.get("workspace_open").getAsBoolean());
         assertFalse(result.get("workspace_ready").getAsBoolean());
+        assertFalse(result.get("workspace_archive_export_supported").getAsBoolean());
         assertFalse(result.get("busy").getAsBoolean());
         assertFalse(result.get("closing").getAsBoolean());
         assertTrue(result.get("expected_input_path").isJsonNull());

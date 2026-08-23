@@ -257,7 +257,14 @@ class BridgeToolService:
             "database": session.sid,
             "state": session.state,
             "input_path": str(session.input_path),
-            "autosave_path": str(session.autosave_path),
+            "autosave_path": (
+                str(session.autosave_path)
+                if session.autosave_path is not None
+                else None
+            ),
+            "workspace_archive_export_supported": (
+                session.autosave_path is not None
+            ),
             "port": session.port,
             "idle_ttl_sec": session.idle_ttl_sec,
         }
@@ -337,9 +344,24 @@ class BridgeToolService:
         database = arguments.get("database")
         if not isinstance(database, str) or not database:
             return _error_result("database is required", "invalid_params")
-        save = arguments.get("save", True)
-        if not isinstance(save, bool):
+        requested_save = arguments.get("save")
+        if requested_save is not None and not isinstance(requested_save, bool):
             return _error_result("save must be a boolean", "invalid_params")
+        session = await self._sessions.get(database)
+        if session is None:
+            return _error_result("unknown Recaf session", "unknown_database")
+        save = (
+            session.autosave_path is not None
+            if requested_save is None
+            else requested_save
+        )
+        if session.autosave_path is None and (
+            save or arguments.get("output_path") is not None
+        ):
+            return _error_result(
+                "APK/DEX workspace archive export is unsupported",
+                "save_unsupported",
+            )
         if not save and arguments.get("output_path") is not None:
             return _error_result(
                 "output_path cannot be used when save is false",
@@ -388,6 +410,11 @@ class BridgeToolService:
         session = await self._sessions.get(database)
         if session is None:
             return _error_result("unknown Recaf session", "unknown_database")
+        if session.autosave_path is None:
+            return _error_result(
+                "APK/DEX workspace archive export is unsupported",
+                "save_unsupported",
+            )
         if not self._session_ready(session):
             return _error_result("Recaf session is not ready", "session_not_ready")
 
@@ -488,6 +515,10 @@ class BridgeToolService:
         output_path: str | None,
         overwrite: bool,
     ) -> dict[str, Any]:
+        if session.autosave_path is None:
+            raise SaveWorkspaceError(
+                "APK/DEX workspace archive export is unsupported"
+            )
         requested = session.autosave_path if output_path is None else output_path
         destination: Path | None = None
         try:
@@ -587,7 +618,7 @@ class BridgeToolService:
         return graceful, warning
 
     async def _shutdown_bridge_session(self, database: str) -> str | None:
-        """Save one live session or persist it without terminating the Worker."""
+        """Close unsavable sessions; save or recover savable sessions."""
         session = await self._sessions.get(database)
         if session is None:
             return None
@@ -604,27 +635,29 @@ class BridgeToolService:
         if claimed is None:
             return None
 
-        saved = False
+        discard_only = claimed.autosave_path is None
+        completed = False
         failure: str | None = None
         with anyio.move_on_after(30) as drain_scope:
             try:
                 async with claimed.operation_lock:
                     if claimed.process.returncode is not None:
-                        saved = True
+                        completed = True
                     else:
-                        await self._save_locked(
-                            claimed,
-                            output_path=None,
-                            overwrite=False,
-                        )
-                        saved = True
+                        if not discard_only:
+                            await self._save_locked(
+                                claimed,
+                                output_path=None,
+                                overwrite=False,
+                            )
+                        completed = True
                         await self._shutdown_locked(claimed)
             except (PathReservationError, SaveWorkspaceError) as error:
                 failure = str(error)[:1000]
         if drain_scope.cancel_called:
             failure = "timed out waiting for in-flight session operations"
 
-        if saved:
+        if completed or discard_only:
             with anyio.CancelScope(shield=True):
                 await self._launcher.abort(database)
             return None
@@ -669,8 +702,9 @@ class BridgeToolService:
         return session.process.returncode is not None, warning
 
     async def _expire_idle_locked(self, session: Session) -> None:
-        """Save and request shutdown while the watchdog owns the session lock."""
-        await self._save_locked(session, output_path=None, overwrite=False)
+        """Persist savable sessions, then request shutdown while locked."""
+        if session.autosave_path is not None:
+            await self._save_locked(session, output_path=None, overwrite=False)
         await self._shutdown_locked(session)
 
     async def _finalize_idle_session(self, database: str) -> None:
@@ -701,7 +735,14 @@ class BridgeToolService:
             "database": session.sid,
             "state": state,
             "input_path": str(session.input_path),
-            "autosave_path": str(session.autosave_path),
+            "autosave_path": (
+                str(session.autosave_path)
+                if session.autosave_path is not None
+                else None
+            ),
+            "workspace_archive_export_supported": (
+                session.autosave_path is not None
+            ),
             "port": session.port,
             "idle_ttl_sec": session.idle_ttl_sec,
             "idle_remaining_sec": idle_remaining,

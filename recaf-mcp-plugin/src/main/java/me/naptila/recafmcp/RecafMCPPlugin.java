@@ -287,7 +287,10 @@ public class RecafMCPPlugin implements Plugin {
             health.setLastError("workspace primary resource has no input path");
             return;
         }
-        health.markWorkspaceReady(canonicalize(inputPath).toString());
+        health.markWorkspaceReady(
+                canonicalize(inputPath).toString(),
+                RecafSaveWorkspaceHandler.supportsArchiveExport(workspace)
+        );
     }
 
     private static Path canonicalize(Path path) {

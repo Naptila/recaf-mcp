@@ -81,11 +81,11 @@ JSON-RPC envelopes, notifications, and batches. Responses use
 
 Authenticated internal methods are:
 
-- `health`: process/build/schema/workspace identity, readiness, busy/closing
-  state, and bounded last error;
+- `health`: process/build/schema/workspace identity, readiness, archive-export
+  capability, busy/closing state, and bounded last error;
 - `cancel_operation`: interrupt one exact Bridge-owned operation ID;
-- `save_workspace`: low-level primary-resource export with ZIP validation and
-  atomic installation;
+- `save_workspace`: low-level JVM primary-resource export with ZIP validation
+  and atomic installation; APK/DEX workspaces are rejected;
 - `shutdown`: response-before-exit graceful termination;
 - `probe/headless_services`: retained headless regression probe.
 
@@ -250,7 +250,8 @@ the bounded exception: `rename_symbol` and `apply_mappings` mutate DEX class
 trees in memory, while `export_mappings` returns their aggregate mapping text.
 `export_sources` may write derived Android Java source to a ZIP; it
 does not rebuild or modify the APK. JVM mutations are in-memory until the
-Bridge explicitly saves them; APK sessions must close with `save=false`.
+Bridge explicitly saves them. The Bridge gives APK sessions no autosave path
+and closes them without export when `save` is omitted.
 
 Invalid tool arguments preserve a bounded diagnostic in the JSON-RPC error.
 Invalid regular expressions identify the selector, Java regex description,
@@ -270,10 +271,13 @@ never installs a partial destination.
 An analysis Worker is ready only when authenticated health reports
 `ready=true`, `workspace_open=true`, and `workspace_ready=true`; the canonical
 expected/input paths, process PID, plugin build, and schema fingerprint must
-also match the Bridge's launch record.
+also match the Bridge's launch record. Health reports
+`workspace_archive_export_supported=false` for an APK, DEX, or any primary
+resource containing Android class bundles.
 
-Saving exports only the primary resource to a temporary sibling with Recaf's
-low-level workspace exporter, validates a nonempty ZIP/JAR, and atomically
-installs it. Input aliases and unapproved existing destinations are rejected.
-A failed save leaves the Worker ready and records a retryable `last_error`; a
-later successful save clears it.
+Saving exports only a supported JVM primary resource to a temporary sibling
+with Recaf's low-level workspace exporter, validates a nonempty ZIP/JAR, and
+atomically installs it. Android workspace export is rejected before creating a
+temporary output. Input aliases and unapproved existing destinations are
+rejected. A failed save leaves the Worker ready and records a retryable
+`last_error`; a later successful save clears it.

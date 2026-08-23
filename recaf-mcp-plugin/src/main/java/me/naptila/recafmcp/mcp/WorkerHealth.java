@@ -15,6 +15,7 @@ public final class WorkerHealth {
     private final String recafVersion;
     private final String recafCommit;
     private final AtomicBoolean workspaceReady = new AtomicBoolean();
+    private final AtomicBoolean workspaceArchiveExportSupported = new AtomicBoolean();
     private final AtomicReference<String> actualInputPath = new AtomicReference<>();
     private final AtomicReference<String> startupError = new AtomicReference<>();
     private final AtomicReference<String> lastError = new AtomicReference<>();
@@ -32,6 +33,11 @@ public final class WorkerHealth {
     }
 
     public void markWorkspaceReady(String inputPath) {
+        markWorkspaceReady(inputPath, true);
+    }
+
+    public void markWorkspaceReady(String inputPath,
+                                   boolean archiveExportSupported) {
         actualInputPath.set(inputPath);
         if (expectedInputPath == null) {
             setLastError("workspace opened without an expected input path");
@@ -41,6 +47,7 @@ public final class WorkerHealth {
             setLastError("workspace input path does not match the expected input path");
             return;
         }
+        workspaceArchiveExportSupported.set(archiveExportSupported);
         workspaceReady.set(true);
     }
 
@@ -75,6 +82,10 @@ public final class WorkerHealth {
 
     public boolean isWorkspaceReady() {
         return workspaceReady.get();
+    }
+
+    public boolean isWorkspaceArchiveExportSupported() {
+        return workspaceReady.get() && workspaceArchiveExportSupported.get();
     }
 
     public String getExpectedInputPath() {

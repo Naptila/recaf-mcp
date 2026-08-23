@@ -25,7 +25,7 @@ source checkout, modified Recaf build, or published Python package is needed.
 | Patch JVM | Compile replacement Java source, run safe Recaf transforms, edit exact method instructions |
 | Analyze APK/DEX | Android classes, decoded binary XML, DEX strings/instructions/members/calls, reconstructed single-class DEX |
 | Automate | Compile and run version-matched Recaf Java scripts for custom deobfuscation |
-| Manage sessions | Multiple isolated Workers, save/reopen, idle autosave, cancellation, cleanup, and recovery |
+| Manage sessions | Multiple isolated Workers, JAR save/reopen, format-aware idle cleanup, cancellation, and recovery |
 
 All 26 tools are advertised before a target is opened, so clients do not need
 dynamic tool-list support. The complete tool catalog is shown below.
@@ -130,11 +130,12 @@ reported by `command -v recaf-mcp-bridge`.
 | 3 | `workspace_info(database=...)` | Summarizes the loaded target |
 | 4 | `list_classes(database=...)` or another analysis tool | Begins analysis |
 | 5 | `recaf_save(database=..., output_path=...)` | Writes a modified JAR |
-| 6 | `recaf_close(database=..., save=false)` | Closes without saving |
+| 6 | `recaf_close(database=...)` | Saves a JAR, or closes an APK/DEX without export |
 
 All lifecycle paths must be absolute. Pass the returned `database` to every
-Worker tool. `recaf_close` saves JAR changes by default; use `save=false` to
-discard them and always use it for APK sessions.
+Worker tool. With `save` omitted, `recaf_close` saves JAR changes but closes
+APK/DEX sessions without exporting a JAR. Use `save=false` to discard JAR
+changes; Android archive saving is rejected explicitly.
 
 ## Configuration
 
@@ -152,7 +153,7 @@ token is present, so the installed plugin remains dormant.
 | `RECAF_JAVA_COMMAND` | `java` | JDK executable used for Workers |
 | `RECAF_MAX_SESSIONS` | `2` | Concurrent pending/ready Worker cap, 1–32 |
 | `RECAF_WORKER_MAX_HEAP_MB` | `1024` | Per-Worker maximum heap, at least 128 MiB |
-| `RECAF_IDLE_TTL_SEC` | `600` | Default autosave/close idle time; `0` disables it |
+| `RECAF_IDLE_TTL_SEC` | `600` | Idle cleanup time: autosave JARs, close APK/DEX without export; `0` disables it |
 | `RECAF_RESPONSE_PROFILE` | `compact` | `compact` avoids duplicate JSON text; `legacy` restores it |
 | `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | Worker launch readiness deadline |
 | `RECAF_SESSION_ROOT` | system temp | Owner-only live session directory |
@@ -175,11 +176,11 @@ by `recaf_open`.
 
 | Tool | Purpose | Key behavior |
 | --- | --- | --- |
-| `recaf_open` | Open a JAR or APK | Absolute input path; returns `database` |
+| `recaf_open` | Open a JAR or APK | Returns `database`, save capability, and a nullable autosave path |
 | `recaf_list` | List open sessions | Safe installation smoke test |
-| `set_idle_ttl` | Change idle timeout | `0` disables idle autosave/close |
+| `set_idle_ttl` | Change idle timeout | `0` disables automatic idle cleanup |
 | `recaf_save` | Export a modified JAR | Atomic output; APK/DEX save is unsupported |
-| `recaf_close` | Close a session | Saves JARs by default; use `save=false` to discard |
+| `recaf_close` | Close a session | Omitted `save` saves JARs and never exports APK/DEX |
 
 ### Browse and decompile
 
@@ -256,7 +257,7 @@ whether an LLM context compaction discarded the caller's cached body.
 | Topic | Rule |
 | --- | --- |
 | JAR mutations | Stay in memory until `recaf_save` or a saving `recaf_close` |
-| APK sessions | Analysis and in-memory mappings only; close with `save=false` |
+| APK sessions | Analysis and in-memory mappings only; no autosave path is created, and default close/idle/shutdown cleanup never exports a JAR |
 | `read_file` | Reads only exact entries in the open archive, never arbitrary host paths |
 | `export_sources` | Requires an absolute output path and installs a validated ZIP atomically |
 | Recaf scripts | Have full Worker filesystem/network/process access and are not transactional |
@@ -279,7 +280,7 @@ uv run pytest -q
 
 The opt-in real suite additionally starts installed Recaf Workers and exercises
 open, analysis, mutation, paged retrieval, save, reopen, cancellation cleanup,
-idle shutdown, signal cleanup, and authenticated recovery.
+format-aware idle/shutdown cleanup, and authenticated recovery.
 
 ## Troubleshooting
 

@@ -82,39 +82,45 @@ When neither plugin override is set, the Bridge finds exactly one
 Recaf's `RECAF` base-directory override and the platform defaults under
 `%APPDATA%`, `~/Library/Application Support`, or `$XDG_CONFIG_HOME`/`~/.config`.
 Each launch copies only that plugin into a private session directory. Inputs
-and autosaves are canonicalized and reserved before process creation; pending
-launches count toward the session cap.
+and provisional autosaves are canonicalized and reserved before process
+creation; the autosave reservation is released once Recaf identifies an
+APK/DEX workspace. Pending launches count toward the session cap.
 
 The launcher does not use a shell. It gives every attempt a new loopback port,
 random bearer token, isolated Recaf data directory, plugin directory, log, and
 process group. Authenticated readiness must match the expected input path,
-plugin build, schema fingerprint, and fully opened workspace. Launch failures
-terminate the owned process group, release all reservations, and expose only a
-bounded token-redacted log tail.
+plugin build, schema fingerprint, fully opened workspace, and archive-export
+capability. Launch failures terminate the owned process group, release all
+reservations, and expose only a bounded token-redacted log tail.
 
 ## Available session flow
 
 The lifecycle and routed analysis flow is connected end to end:
 
 - `recaf_open(input_path, autosave_path?, idle_ttl_sec?)` returns an opaque
-  `database` session ID only after authenticated workspace readiness.
+  `database` session ID only after authenticated workspace readiness. It also
+  reports `workspace_archive_export_supported`; APK/DEX sessions return
+  `autosave_path=null` and reject an explicit autosave path.
 - `recaf_list()` returns public session state, canonical paths, port, idle
   status, busy state, and save errors. It never returns a token.
 - `set_idle_ttl(database, idle_ttl_sec)` updates the timeout from 0 (disabled)
   through 604800 seconds, touches the session, and resets a pending watchdog
   retry schedule.
 - `recaf_save(database, output_path?, overwrite=false)` serializes with routed
-  operations and atomically exports the primary resource. The managed autosave
-  can be replaced by its owner; a user-selected existing target requires
-  `overwrite=true`.
+  operations and atomically exports a supported JVM primary resource. The
+  managed autosave can be replaced by its owner; a user-selected existing
+  target requires `overwrite=true`. APK/DEX save is rejected before any file
+  is written.
 - Worker-owned `workspace_info(database)`, `list_classes(database, ...)`,
   `list_files(database, ...)`, `read_file(database, ...)`, and
   `decompile_class(database, ...)`, plus bulk source export, search, rename,
   and mapping tools, route through a generic allowlist proxy to the selected
   ready session.
-- `recaf_close(database, save=true, output_path?)` saves before shutdown by
-  default. If saving fails or is interrupted, the session returns to `ready`
-  with `save_error` exposed by `recaf_list`, so the caller can retry.
+- `recaf_close(database, save?, output_path?)` uses a format-aware default:
+  JAR sessions save before shutdown, while APK/DEX sessions close without an
+  archive export. Explicit `save=true` is rejected for APK/DEX. If a JAR save
+  fails or is interrupted, the session returns to `ready` with `save_error`
+  exposed by `recaf_list`, so the caller can retry.
 - `recaf_close(database, save=false)` is the explicit discard path. It drains
   the session operation lock, requests graceful Worker shutdown, escalates the
   owned process group when needed, and releases capacity and path reservations.
@@ -155,13 +161,13 @@ do not request progress see identical tool behavior and results.
 
 Save and source-export destinations must be absolute, must not alias any active
 input, and cannot be owned by another session. A source export also cannot
-replace the session's managed autosave. The Bridge verifies that saves return the
-reserved canonical path and that the installed file exists with the reported
-nonzero size before it considers a save successful. Shutdown is requested only
-after that validation succeeds, so save failure never silently destroys the
-live session.
+replace a JAR session's managed autosave. The Bridge verifies that saves return
+the reserved canonical path and that the installed file exists with the
+reported nonzero size before it considers a save successful. Shutdown is
+requested only after that validation succeeds, so save failure never silently
+destroys a live JAR session.
 
-## Idle autosave
+## Idle cleanup
 
 The server lifespan checks for expired sessions every five seconds. The
 watchdog first identifies an idle, non-busy session, marks it closing to block
@@ -169,8 +175,9 @@ new routed operations, acquires its operation lock, then re-checks liveness,
 busy state, activity time, TTL, and retry deadline. A request that starts or
 finishes during that race therefore prevents expiration.
 
-An expired session is atomically saved to its managed autosave before Worker
-shutdown and process-group cleanup. A save failure keeps a responsive Worker
+An expired JAR session is atomically saved to its managed autosave before
+Worker shutdown and process-group cleanup. APK/DEX sessions skip archive export
+and proceed directly to shutdown. A JAR save failure keeps a responsive Worker
 alive, restores the session to `ready`, and leaves the bounded diagnostic in
 `recaf_list.save_error`. Retries use delays of 5, 10, 20, and so on up to a
 300-second maximum. A successful explicit save or `set_idle_ttl` clears the
@@ -181,8 +188,9 @@ session.
 
 Client EOF, SIGINT, and SIGTERM stop new tool calls, cancel idle coordination,
 and give each live session up to 30 seconds to drain. The Bridge atomically
-saves before requesting Worker shutdown. A successful signal-driven shutdown
-exits with status 0 even when the client's stdin pipe remains open.
+saves JAR sessions before requesting Worker shutdown and closes APK/DEX
+sessions without export. A successful signal-driven shutdown exits with status
+0 even when the client's stdin pipe remains open.
 
 If a save fails, the Bridge deliberately leaves that Worker alive and exits
 nonzero. It writes one atomic JSON entry per session under the recovery
@@ -396,7 +404,8 @@ Android bytecode analysis operates directly on Recaf's DEX tree. Transform,
 patch, save, and APK/DEX archive rebuilding remain unsupported, but the three
 mapping tools support in-memory DEX symbol renames and mapping-text export.
 Bulk decompilation can export derived Android Java source without changing
-that archive boundary. Close APK sessions with `recaf_close(save=false)`.
+that archive boundary. Omit `save` when closing an APK session; the Bridge
+closes it without creating or exporting a JAR.
 
 `rename_symbol(database, kind, name, new_name, owner?, descriptor?,
 scope="jvm", dex_name?)` renames one exact primary-resource JVM or Android
@@ -575,7 +584,7 @@ with the regular pytest command. They verify both the raw launcher and the full
 MCP `tools/list` → `recaf_open` → routed analysis/mutation → atomic save/default
 close → reopen flow, including progress notifications, source/bytecode page
 reconstruction, a descriptor-aware method rename with updated call sites,
-occupied-output failure/retry, and real one-second-TTL automatic
+occupied-output failure/retry, and real one-second-TTL automatic JAR
 autosave/termination behavior. They also cover failed-save recovery across
 Bridge instances and real SIGTERM save/cleanup with stdin still open.
 
@@ -589,5 +598,5 @@ Android analysis and mapping suite. It verifies generic file listing/manifest re
 scope schemas, multi-DEX
 identity, Android-to-JVM source decompilation, reconstructed single-class DEX
 bytes, native DEX instruction search/disassembly, a full-APK call-graph index,
-Android source/string/member searches, in-memory method/class renames, and all
-seven mapping-text exports without saving the APK.
+Android source/string/member searches, in-memory method/class renames, all
+seven mapping-text exports, and default close without creating a JAR.

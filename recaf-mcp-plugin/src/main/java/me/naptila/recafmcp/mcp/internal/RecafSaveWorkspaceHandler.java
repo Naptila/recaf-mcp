@@ -1,6 +1,8 @@
 package me.naptila.recafmcp.mcp.internal;
 
 import com.google.gson.JsonObject;
+import software.coley.recaf.info.ApkFileInfo;
+import software.coley.recaf.info.DexFileInfo;
 import software.coley.recaf.info.properties.builtin.InputFilePathProperty;
 import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.services.workspace.io.PathWorkspaceExportConsumer;
@@ -8,6 +10,7 @@ import software.coley.recaf.services.workspace.io.WorkspaceExportOptions;
 import software.coley.recaf.services.workspace.io.WorkspaceOutputType;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.resource.WorkspaceFileResource;
+import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -31,6 +34,9 @@ public final class RecafSaveWorkspaceHandler implements SaveWorkspaceHandler {
         Workspace workspace = workspaceManager.getCurrent();
         if (!(workspace.getPrimaryResource() instanceof WorkspaceFileResource fileResource)) {
             throw new IOException("workspace primary resource is not file-backed");
+        }
+        if (!supportsArchiveExport(workspace)) {
+            throw new IOException("APK/DEX workspace archive export is unsupported");
         }
         Path input = InputFilePathProperty.get(fileResource.getFileInfo());
         if (input == null) {
@@ -56,5 +62,22 @@ public final class RecafSaveWorkspaceHandler implements SaveWorkspaceHandler {
         result.addProperty("path", installed.path().toString());
         result.addProperty("size_bytes", installed.sizeBytes());
         return result;
+    }
+
+    /**
+     * @return {@code true} when Recaf can persist the primary resource without
+     *         converting an Android workspace into a different archive type.
+     */
+    public static boolean supportsArchiveExport(Workspace workspace) {
+        WorkspaceResource primary = workspace.getPrimaryResource();
+        if (!(primary instanceof WorkspaceFileResource fileResource)) {
+            return false;
+        }
+        if (fileResource.getFileInfo() instanceof ApkFileInfo
+                || fileResource.getFileInfo() instanceof DexFileInfo) {
+            return false;
+        }
+        return primary.androidClassBundleStreamRecursive()
+                .allMatch(bundle -> bundle.isEmpty());
     }
 }

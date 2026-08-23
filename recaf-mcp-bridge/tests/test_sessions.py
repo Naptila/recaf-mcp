@@ -75,6 +75,30 @@ def test_relative_autosave_path_is_rejected(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
+def test_managed_autosave_can_be_disabled_for_unsavable_inputs(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "input.apk"
+    input_path.write_bytes(b"apk")
+
+    async def scenario() -> None:
+        reservations = PathReservations()
+        paths = await reservations.reserve("android", input_path)
+        assert await reservations.owns("android", paths.autosave_path)
+
+        await reservations.disable_autosave("android", paths.autosave_path)
+
+        assert not await reservations.owns("android", paths.autosave_path)
+        output = await reservations.reserve_output(
+            "android",
+            paths.autosave_path,
+        )
+        await reservations.release_output("android", output)
+        await reservations.release("android")
+
+    anyio.run(scenario)
+
+
 def test_temporary_output_reservations_are_isolated_and_released(
     tmp_path: Path,
 ) -> None:

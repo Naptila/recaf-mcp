@@ -129,6 +129,8 @@ class RecoveryRegistry:
         error: str,
     ) -> Path:
         """Atomically store enough secret state to authenticate this Worker."""
+        if session.autosave_path is None:
+            raise RuntimeError("APK/DEX sessions do not have recoverable autosaves")
         start_id = self._process_start_reader(session.process.pid)
         if start_id is None or session.process.returncode is not None:
             raise RuntimeError("Worker process identity cannot be persisted safely")
@@ -244,6 +246,7 @@ class RecoveryRegistry:
             or health.get("ready") is not True
             or health.get("workspace_open") is not True
             or health.get("workspace_ready") is not True
+            or health.get("workspace_archive_export_supported") is not True
             or health.get("closing") is True
         ):
             raise RuntimeError("authenticated Worker is not recoverable")

@@ -94,15 +94,25 @@ class FakeLauncher:
         autosave_path: str | Path | None = None,
         idle_ttl_sec: int | None = None,
     ) -> Session:
+        android = Path(input_path).suffix.lower() in {".apk", ".dex"}
+        if android and autosave_path is not None:
+            raise ValueError("autosave_path is unsupported for APK/DEX workspaces")
         sid = await self.manager.reserve_slot()
         paths = await self.reservations.reserve(sid, input_path, autosave_path)
+        effective_autosave = paths.autosave_path
+        if android:
+            await self.reservations.disable_autosave(
+                sid,
+                paths.autosave_path,
+            )
+            effective_autosave = None
         session = Session(
             sid=sid,
             process=FakeProcess(),
             port=43111,
             token="secret-worker-token",
             input_path=paths.input_path,
-            autosave_path=paths.autosave_path,
+            autosave_path=effective_autosave,
             session_dir=self.root / sid,
             data_dir=self.root / sid / "data",
             log_path=self.root / sid / "worker.log",
@@ -286,6 +296,116 @@ def test_service_discovers_once_and_routes_initial_session_tools(
         assert await manager.slot_count() == 0
 
         await service.close()
+
+    anyio.run(scenario)
+
+
+def test_android_session_defaults_to_close_without_export(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.apk"
+    input_path.write_bytes(b"apk")
+    config = make_config(tmp_path)
+    manager = SessionManager(1)
+    reservations = PathReservations()
+    launcher = FakeLauncher(manager, reservations, config.session_root)
+    rpc_client = FakeRpcClient()
+    service = BridgeToolService(
+        config,
+        sessions=manager,
+        reservations=reservations,
+        discovery=FakeDiscovery(),
+        launcher_factory=lambda identity: launcher,
+        rpc_client=rpc_client,
+    )
+
+    async def scenario() -> None:
+        tools = await service.list_tools()
+        close_schema = next(
+            tool.inputSchema for tool in tools if tool.name == "recaf_close"
+        )
+        assert "default" not in close_schema["properties"]["save"]
+
+        opened = await service.call("recaf_open", {"input_path": str(input_path)})
+        assert opened.isError is False
+        assert opened.structuredContent["autosave_path"] is None
+        assert opened.structuredContent[
+            "workspace_archive_export_supported"
+        ] is False
+        database = opened.structuredContent["database"]
+
+        listed = await service.call("recaf_list", {})
+        listed_session = listed.structuredContent["sessions"][0]
+        assert listed_session["autosave_path"] is None
+        assert listed_session["workspace_archive_export_supported"] is False
+
+        save = await service.call("recaf_save", {"database": database})
+        assert save.isError is True
+        assert save.structuredContent["error"] == "save_unsupported"
+        explicit_save = await service.call(
+            "recaf_close",
+            {"database": database, "save": True},
+        )
+        assert explicit_save.isError is True
+        assert explicit_save.structuredContent["error"] == "save_unsupported"
+
+        session = await manager.get(database)
+        assert session is not None
+        rpc_client.process = session.process
+        closed = await service.call("recaf_close", {"database": database})
+        assert closed.isError is False
+        assert closed.structuredContent["saved"] is False
+        assert rpc_client.requests == [
+            (43111, "secret-worker-token", "shutdown", None)
+        ]
+        assert list(tmp_path.glob("*.recaf-autosave-*.jar")) == []
+        await service.close()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("trigger", ["bridge_shutdown", "idle_timeout"])
+def test_android_automatic_cleanup_never_exports(
+    tmp_path: Path,
+    trigger: str,
+) -> None:
+    input_path = tmp_path / "input.apk"
+    input_path.write_bytes(b"apk")
+    config = make_config(tmp_path)
+    manager = SessionManager(1)
+    reservations = PathReservations()
+    launcher = FakeLauncher(manager, reservations, config.session_root)
+    rpc_client = FakeRpcClient()
+    service = BridgeToolService(
+        config,
+        sessions=manager,
+        reservations=reservations,
+        discovery=FakeDiscovery(),
+        launcher_factory=lambda identity: launcher,
+        rpc_client=rpc_client,
+    )
+
+    async def scenario() -> None:
+        opened = await service.call(
+            "recaf_open",
+            {"input_path": str(input_path), "idle_ttl_sec": 1},
+        )
+        database = opened.structuredContent["database"]
+        session = await manager.get(database)
+        assert session is not None
+        rpc_client.process = session.process
+
+        if trigger == "bridge_shutdown":
+            await service.close()
+        else:
+            session.last_touched = time.monotonic() - 2
+            await service._watchdog.run_once()
+            await service.close()
+
+        assert rpc_client.requests == [
+            (43111, "secret-worker-token", "shutdown", None)
+        ]
+        assert launcher.aborted == [database]
+        assert await manager.slot_count() == 0
+        assert list(tmp_path.glob("*.recaf-autosave-*.jar")) == []
 
     anyio.run(scenario)
 

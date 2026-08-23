@@ -84,6 +84,7 @@ def matching_health(session: Session) -> dict[str, Any]:
         "ready": True,
         "workspace_open": True,
         "workspace_ready": True,
+        "workspace_archive_export_supported": True,
         "busy": False,
         "closing": False,
         "expected_input_path": str(session.input_path),

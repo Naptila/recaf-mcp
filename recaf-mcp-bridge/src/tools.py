@@ -36,7 +36,10 @@ LIFECYCLE_TOOLS = (
                 },
                 "autosave_path": {
                     "type": "string",
-                    "description": "Optional absolute autosave destination.",
+                    "description": (
+                        "Optional absolute autosave destination for a savable "
+                        "JVM archive; unsupported for APK/DEX."
+                    ),
                 },
                 "idle_ttl_sec": {
                     "type": "integer",
@@ -61,11 +64,20 @@ LIFECYCLE_TOOLS = (
     ),
     types.Tool(
         name="recaf_close",
-        description="Close a session; use save=false for APK/DEX.",
+        description=(
+            "Close a session; omitted save persists JVM archives and discards "
+            "APK/DEX sessions without exporting them."
+        ),
         inputSchema=_object_schema(
             {
                 "database": {"type": "string", "minLength": 1},
-                "save": {"type": "boolean", "default": True},
+                "save": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicitly save or discard. Omit for format-aware "
+                        "default behavior."
+                    ),
+                },
                 "output_path": {"type": "string"},
             },
             ["database"],

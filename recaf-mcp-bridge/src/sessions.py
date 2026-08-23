@@ -38,7 +38,7 @@ class Session:
     port: int
     token: str
     input_path: Path
-    autosave_path: Path
+    autosave_path: Path | None
     session_dir: Path
     data_dir: Path
     log_path: Path
@@ -279,6 +279,18 @@ class PathReservations:
                 )
             self._targets[canonical_output] = sid
             return canonical_output
+
+    async def disable_autosave(self, sid: str, autosave_path: Path) -> None:
+        """Release a pending session's managed target for an unsavable input."""
+        canonical = autosave_path.expanduser().resolve(strict=False)
+        async with self._lock:
+            if self._managed_targets.get(sid) != canonical:
+                raise PathReservationError(
+                    "session autosave reservation does not match"
+                )
+            self._managed_targets.pop(sid)
+            if self._targets.get(canonical) == sid:
+                del self._targets[canonical]
 
     async def release_output(self, sid: str, output_path: Path) -> None:
         """Release a temporary output while retaining the managed autosave."""

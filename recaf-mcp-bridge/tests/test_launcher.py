@@ -90,6 +90,7 @@ def ready_health(input_path: Path, pid: int) -> dict[str, Any]:
         "ready": True,
         "workspace_open": True,
         "workspace_ready": True,
+        "workspace_archive_export_supported": True,
         "expected_input_path": str(input_path.resolve()),
         "input_path": str(input_path.resolve()),
         "plugin_build": "1.0.0",
@@ -224,6 +225,56 @@ def test_port_collision_retries_with_fresh_process_port_and_token(
         assert terminator.processes == [starter.processes[0]]
         assert probe.tokens[0] != probe.tokens[1]
         await launcher.abort(session.sid)
+
+    anyio.run(scenario)
+
+
+def test_android_launch_disables_autosave_and_rejects_an_explicit_target(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "input.apk"
+    input_path.write_bytes(b"apk")
+    starter = RecordingStarter()
+    terminator = RecordingTerminator()
+
+    class AndroidProbe(ReadyProbe):
+        async def probe(self, port: int, token: str) -> dict[str, Any]:
+            health = await super().probe(port, token)
+            health["workspace_archive_export_supported"] = False
+            return health
+
+    launcher, manager, reservations = make_launcher(
+        tmp_path,
+        input_path,
+        AndroidProbe(input_path),
+        starter,
+        terminator,
+        [43106],
+    )
+
+    async def scenario() -> None:
+        session = await launcher.launch(input_path)
+        managed_target = input_path.with_name(
+            f"input.recaf-autosave-{session.sid}.jar"
+        ).resolve()
+        assert session.autosave_path is None
+        assert not await reservations.owns(session.sid, managed_target)
+        await launcher.abort(session.sid)
+
+        second_starter = RecordingStarter()
+        second_terminator = RecordingTerminator()
+        second, second_manager, _ = make_launcher(
+            tmp_path,
+            input_path,
+            AndroidProbe(input_path),
+            second_starter,
+            second_terminator,
+            [43107],
+        )
+        with pytest.raises(WorkerLaunchError, match="unsupported for APK/DEX"):
+            await second.launch(input_path, tmp_path / "output.jar")
+        assert await second_manager.slot_count() == 0
+        assert second_terminator.processes == second_starter.processes
 
     anyio.run(scenario)
 

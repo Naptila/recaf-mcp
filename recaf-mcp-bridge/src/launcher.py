@@ -274,19 +274,33 @@ class WorkerLauncher:
                         environment,
                         log_path,
                     )
-                    await self._wait_until_ready(
+                    health = await self._wait_until_ready(
                         process,
                         port,
                         token,
                         paths.input_path,
                     )
+                    archive_export_supported = health[
+                        "workspace_archive_export_supported"
+                    ]
+                    effective_autosave_path: Path | None = paths.autosave_path
+                    if not archive_export_supported:
+                        if autosave_path is not None:
+                            raise WorkerLaunchError(
+                                "autosave_path is unsupported for APK/DEX workspaces"
+                            )
+                        await self._reservations.disable_autosave(
+                            sid,
+                            paths.autosave_path,
+                        )
+                        effective_autosave_path = None
                     session = Session(
                         sid=sid,
                         process=process,
                         port=port,
                         token=token,
                         input_path=paths.input_path,
-                        autosave_path=paths.autosave_path,
+                        autosave_path=effective_autosave_path,
                         session_dir=session_root,
                         data_dir=data_dir,
                         log_path=log_path,
@@ -375,7 +389,7 @@ class WorkerLauncher:
         port: int,
         token: str,
         expected_input: Path,
-    ) -> None:
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + self._config.launch_timeout_sec
         while time.monotonic() < deadline:
             if process.returncode is not None:
@@ -397,7 +411,7 @@ class WorkerLauncher:
                 and health.get("workspace_open") is True
                 and health.get("workspace_ready") is True
             ):
-                return
+                return health
             await self._sleep(self._config.readiness_poll_sec)
         raise WorkerPortCollision("Worker readiness timed out on the allocated port")
 
@@ -417,6 +431,13 @@ class WorkerLauncher:
             raise WorkerLaunchError("Worker input identity mismatch")
         if health.get("plugin_build") != self._expected_identity.plugin_build:
             raise WorkerLaunchError("Worker plugin build mismatch")
+        if not isinstance(
+            health.get("workspace_archive_export_supported"),
+            bool,
+        ):
+            raise WorkerLaunchError(
+                "Worker archive-export capability is missing"
+            )
         if (
             health.get("schema_fingerprint")
             != self._expected_identity.schema_fingerprint

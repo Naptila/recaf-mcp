@@ -1547,6 +1547,10 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
                     {"input_path": str(input_path)},
                 )
                 assert opened.isError is False
+                assert opened.structuredContent["autosave_path"] is None
+                assert opened.structuredContent[
+                    "workspace_archive_export_supported"
+                ] is False
                 database = opened.structuredContent["database"]
 
                 apk_files = await client.call_tool(
@@ -1961,7 +1965,7 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
 
                 closed = await client.call_tool(
                     "recaf_close",
-                    {"database": database, "save": False},
+                    {"database": database},
                 )
                 assert closed.isError is False
                 assert closed.structuredContent["saved"] is False
