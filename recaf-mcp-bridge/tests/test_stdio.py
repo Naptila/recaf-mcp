@@ -73,7 +73,7 @@ def test_stdio_initialize_list_and_call_lifecycle() -> None:
         initialized = read_message(process.stdout)
         assert initialized["result"]["serverInfo"] == {
             "name": "recaf-mcp-bridge",
-            "version": "1.0.0",
+            "version": "1.0.1",
         }
         assert initialized["result"]["capabilities"]["tools"] == {
             "listChanged": False

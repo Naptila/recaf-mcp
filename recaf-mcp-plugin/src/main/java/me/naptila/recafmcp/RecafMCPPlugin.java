@@ -72,7 +72,7 @@ import java.util.List;
 )
 public class RecafMCPPlugin implements Plugin {
     public static final String PLUGIN_ID = "me.naptila.recaf-mcp-plugin";
-    public static final String PLUGIN_VERSION = "1.0.0";
+    public static final String PLUGIN_VERSION = "1.0.1";
     public static final String PLUGIN_NAME = "Recaf MCP Plugin";
     public static final String PLUGIN_DESCRIPTION =
             "MCP server for autonomous Java reverse engineering via LLM agents";

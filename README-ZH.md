@@ -44,7 +44,7 @@ Recaf，也无需发布 Python 包。
 无需检出源码或在本地构建项目。从
 [最新 GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
 下载
-[`recaf-mcp-plugin-1.0.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf-mcp-plugin-1.0.0.jar)，
+[`recaf-mcp-plugin-1.0.1.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf-mcp-plugin-1.0.1.jar)，
 并将其复制到 Recaf 插件目录：
 
 | 平台 | Recaf 插件目录 |
@@ -56,7 +56,7 @@ Recaf，也无需发布 Python 包。
 直接从同一个 Release 安装跨平台 Bridge wheel：
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf_mcp_bridge-1.0.0-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf_mcp_bridge-1.0.1-py3-none-any.whl
 ```
 
 该命令会安装 `recaf-mcp-bridge`，项目本身无需发布到 PyPI。
@@ -69,7 +69,7 @@ uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/re
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.0.0.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.0.1.jar ~/.config/Recaf/plugins/
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```

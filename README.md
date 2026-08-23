@@ -44,7 +44,7 @@ dynamic tool-list support. The complete tool catalog is shown below.
 ### Install from a Release (recommended)
 
 No source checkout or local build is required. Download the
-[`recaf-mcp-plugin-1.0.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf-mcp-plugin-1.0.0.jar)
+[`recaf-mcp-plugin-1.0.1.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf-mcp-plugin-1.0.1.jar)
 asset from the [latest GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
 and copy it into Recaf's plugin directory:
 
@@ -57,7 +57,7 @@ and copy it into Recaf's plugin directory:
 Install the cross-platform Bridge wheel directly from the same Release:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf_mcp_bridge-1.0.0-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf_mcp_bridge-1.0.1-py3-none-any.whl
 ```
 
 This installs the `recaf-mcp-bridge` command without publishing the project to
@@ -71,7 +71,7 @@ To build the plugin and install the Bridge from a checkout instead:
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.0.0.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.0.1.jar ~/.config/Recaf/plugins/
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```

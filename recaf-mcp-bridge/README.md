@@ -18,7 +18,7 @@ Python 3.11 or newer and `uv` are required. Install the cross-platform wheel
 directly from GitHub without a checkout or local build:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.0/recaf_mcp_bridge-1.0.0-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf_mcp_bridge-1.0.1-py3-none-any.whl
 ```
 
 To install from a local source checkout instead:
