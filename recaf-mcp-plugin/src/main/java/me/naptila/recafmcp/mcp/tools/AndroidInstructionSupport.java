@@ -81,7 +81,7 @@ final class AndroidInstructionSupport {
             ));
             fallbackOffset = Math.max(
                     fallbackOffset,
-                    offset + Math.max(0, instruction.byteSize())
+                    offset + Math.max(0, instruction.unitSize())
             );
         }
         return lines;

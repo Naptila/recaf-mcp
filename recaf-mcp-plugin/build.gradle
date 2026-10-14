@@ -14,7 +14,7 @@ ext {
     // For Recaf versions:
     //  - Releases: https://mvnrepository.com/artifact/software.coley/recaf-core
     //  - Snapshots: https://jitpack.io/#Col-E/Recaf  (see commits tab)
-    recafVersion = 'cc1676ce7'
+    recafVersion = '17216bd3b76bc6ef36c4198262b5318e2936fbb7'
     recafSnapshots = true
 
     // This should point to the full name of the class that 'implements Plugin'
@@ -42,6 +42,7 @@ java {
 repositories {
     mavenLocal()
     mavenCentral()
+    google()
 
     // For Recaf snapshot builds a few transitive dependencies
     maven { url 'https://jitpack.io' }

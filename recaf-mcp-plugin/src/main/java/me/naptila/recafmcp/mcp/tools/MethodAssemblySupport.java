@@ -3,7 +3,7 @@ package me.naptila.recafmcp.mcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import me.darknet.assembler.ast.ASTElement;
-import me.darknet.assembler.error.Result;
+import me.darknet.assembler.error.Outcome;
 import me.darknet.assembler.parser.Token;
 import me.darknet.assembler.util.Location;
 import software.coley.recaf.info.JvmClassInfo;
@@ -175,10 +175,10 @@ final class MethodAssemblySupport {
         public OperationResult<String> disassemble(Workspace workspace, Target target) {
             JvmAssemblerPipeline pipeline = pipelineManager.newJvmAssemblerPipeline(workspace);
             try {
-                Result<String> result = pipeline.disassemble(target.path());
+                Outcome<String> result = pipeline.disassemble(target.path());
                 List<Diagnostic> diagnostics = diagnostics("disassemble", result);
                 return new OperationResult<>(
-                        result.hasErr() || !result.hasValue() ? null : result.get(),
+                        result.isSuccess() ? result.value() : null,
                         diagnostics
                 );
             } finally {
@@ -193,27 +193,25 @@ final class MethodAssemblySupport {
             JvmAssemblerPipeline pipeline = pipelineManager.newJvmAssemblerPipeline(workspace);
             try {
                 List<Diagnostic> diagnostics = new ArrayList<>();
-                Result<List<Token>> tokenized = pipeline.tokenize(assembly, "<mcp>");
+                Outcome<List<Token>> tokenized = pipeline.tokenize(assembly, "<mcp>");
                 diagnostics.addAll(diagnostics("tokenize", tokenized));
-                if (tokenized.hasErr() || !tokenized.hasValue()) {
+                if (!tokenized.isSuccess()) {
                     return new OperationResult<>(null, diagnostics);
                 }
 
-                Result<List<ASTElement>> parsed = pipeline.fullParse(tokenized.get());
+                Outcome<List<ASTElement>> parsed = pipeline.fullParse(tokenized.requireValue());
                 diagnostics.addAll(diagnostics("parse", parsed));
-                if (parsed.hasErr() || !parsed.hasValue()) {
+                if (!parsed.isSuccess()) {
                     return new OperationResult<>(null, diagnostics);
                 }
 
-                Result<JvmClassInfo> assembled = pipeline.assembleAndWrap(
-                        parsed.get(),
+                Outcome<JvmClassInfo> assembled = pipeline.assembleAndWrap(
+                        parsed.requireValue(),
                         target.path()
                 );
                 diagnostics.addAll(diagnostics("assemble", assembled));
                 return new OperationResult<>(
-                        assembled.hasErr() || !assembled.hasValue()
-                                ? null
-                                : assembled.get(),
+                        assembled.isSuccess() ? assembled.value() : null,
                         diagnostics
                 );
             } finally {
@@ -221,14 +219,14 @@ final class MethodAssemblySupport {
             }
         }
 
-        private static List<Diagnostic> diagnostics(String stage, Result<?> result) {
+        static List<Diagnostic> diagnostics(String stage, Outcome<?> result) {
             List<Diagnostic> diagnostics = new ArrayList<>();
             result.errors().forEach(error -> diagnostics.add(diagnostic(
                     "error",
                     stage,
                     error
             )));
-            result.getWarns().forEach(warn -> diagnostics.add(diagnostic(
+            result.warnings().forEach(warn -> diagnostics.add(diagnostic(
                     "warning",
                     stage,
                     warn
@@ -239,15 +237,15 @@ final class MethodAssemblySupport {
         private static Diagnostic diagnostic(
                 String level,
                 String stage,
-                me.darknet.assembler.error.Error error) {
-            Location location = error.getLocation();
+                me.darknet.assembler.error.Diagnostic error) {
+            Location location = error.location();
             return new Diagnostic(
                     level,
                     stage,
                     location == null ? -1 : location.line(),
                     location == null ? -1 : location.column(),
                     location == null ? -1 : location.length(),
-                    bounded(error.getMessage(), MAX_DIAGNOSTIC_MESSAGE)
+                    bounded(error.message(), MAX_DIAGNOSTIC_MESSAGE)
             );
         }
     }

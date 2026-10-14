@@ -209,8 +209,7 @@ public final class GetClassBytecodeTool implements McpTool {
                                          int dexVersion) throws IOException {
         DexFile file = new DexFile(
                 dexVersion,
-                List.of(classInfo.getBackingDefinition()),
-                new byte[0]
+                List.of(classInfo.getBackingDefinition())
         );
         DexHeader header = DexFile.CODEC.unmap(file, new DexMapBuilder());
         GrowingOutput output = new GrowingOutput();
