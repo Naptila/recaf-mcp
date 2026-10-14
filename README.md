@@ -36,6 +36,9 @@ dynamic tool-list support. The complete tool catalog is shown below.
   emits Java 22-compatible bytecode; `patch_class` requires a JDK with `javac`,
   not a JRE.
 - A Recaf 4 generic executable JAR, which bundles Recaf's runtime dependencies.
+  Version 1.0.2 targets [Recaf build `17216bd3`](https://github.com/Col-E/Recaf/commit/17216bd3b76bc6ef36c4198262b5318e2936fbb7)
+  (2026-10-14) and its assembler/DEX APIs. Update older Recaf snapshots before
+  upgrading the plugin.
 - Python 3.11 or newer.
 - [`uv`](https://docs.astral.sh/uv/) for the locked Bridge environment.
 
@@ -44,7 +47,7 @@ dynamic tool-list support. The complete tool catalog is shown below.
 ### Install from a Release (recommended)
 
 No source checkout or local build is required. Download the
-[`recaf-mcp-plugin-1.0.1.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf-mcp-plugin-1.0.1.jar)
+[`recaf-mcp-plugin-1.0.2.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.2/recaf-mcp-plugin-1.0.2.jar)
 asset from the [latest GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
 and copy it into Recaf's plugin directory:
 
@@ -57,7 +60,7 @@ and copy it into Recaf's plugin directory:
 Install the cross-platform Bridge wheel directly from the same Release:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.1/recaf_mcp_bridge-1.0.1-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.2/recaf_mcp_bridge-1.0.2-py3-none-any.whl
 ```
 
 This installs the `recaf-mcp-bridge` command without publishing the project to
@@ -71,7 +74,7 @@ To build the plugin and install the Bridge from a checkout instead:
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.0.1.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.0.2.jar ~/.config/Recaf/plugins/
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```

@@ -13,7 +13,7 @@ from tools import LifecycleToolService
 
 
 SERVER_NAME = "recaf-mcp-bridge"
-SERVER_VERSION = "1.0.1"
+SERVER_VERSION = "1.0.2"
 SERVER_INSTRUCTIONS = "Call recaf_open first and reuse its database ID."
 
 

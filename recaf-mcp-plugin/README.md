@@ -23,7 +23,7 @@ target Java 22.
 boundaries. Its production output is:
 
 ```text
-build/libs/recaf-mcp-plugin-1.0.1.jar
+build/libs/recaf-mcp-plugin-1.0.2.jar
 ```
 
 The build checks the service entry and verifies that the plugin does not shade
