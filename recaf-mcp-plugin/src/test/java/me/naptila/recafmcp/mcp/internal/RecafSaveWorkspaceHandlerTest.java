@@ -26,7 +26,7 @@ class RecafSaveWorkspaceHandlerTest {
     }
 
     @Test
-    void rejectsApkAndDexArchiveExport() {
+    void supportsApkAndDexInTheirOriginalFormats() {
         Workspace apk = workspace(new ApkFileInfoBuilder()
                 .withName("input.apk")
                 .withRawContent(new byte[]{1})
@@ -36,8 +36,10 @@ class RecafSaveWorkspaceHandlerTest {
                 .withRawContent(new byte[]{1})
                 .build());
 
-        assertFalse(RecafSaveWorkspaceHandler.supportsArchiveExport(apk));
-        assertFalse(RecafSaveWorkspaceHandler.supportsArchiveExport(dex));
+        assertTrue(RecafSaveWorkspaceHandler.supportsArchiveExport(apk));
+        assertTrue(RecafSaveWorkspaceHandler.supportsArchiveExport(dex));
+        org.junit.jupiter.api.Assertions.assertEquals("apk", RecafSaveWorkspaceHandler.outputFormat(apk));
+        org.junit.jupiter.api.Assertions.assertEquals("dex", RecafSaveWorkspaceHandler.outputFormat(dex));
     }
 
     private static Workspace workspace(software.coley.recaf.info.FileInfo fileInfo) {

@@ -1,5 +1,7 @@
 package me.naptila.recafmcp.mcp.tools;
 
+import me.naptila.recafmcp.mcp.android.AndroidJvmConverter;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
@@ -158,7 +160,7 @@ public final class DecompileClassTool implements McpTool {
                             List.of()
                     );
                 }
-                classInfo = target.classInfo().asAndroidClass().asJvmClass();
+                classInfo = AndroidJvmConverter.convert(target.classInfo().asAndroidClass());
             } else {
                 classInfo = target.classInfo().asJvmClass();
             }

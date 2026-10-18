@@ -1,0 +1,19 @@
+name: Latest Recaf Compatibility
+
+on:
+  schedule:
+    - cron: "31 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recaf-compatibility
+  cancel-in-progress: true
+
+jobs:
+  latest-recaf:
+    uses: ./.github/workflows/real-worker.yml
+    with:
+      recaf-ref: master

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mcp.types as types
+import pytest
 
 from results import expose_structured_content
 
@@ -65,11 +66,13 @@ def test_formats_decompiled_source_and_is_idempotent() -> None:
     assert repeated is exposed
 
 
-def test_formats_complete_method_assembly_for_text_only_clients() -> None:
+@pytest.mark.parametrize("assembly_format", ["recaf_jasm_method", "recaf_jasm_dalvik_method"])
+def test_formats_complete_method_assembly_for_text_only_clients(assembly_format: str) -> None:
     original = types.CallToolResult(
         content=[types.TextContent(type="text", text="read complete method assembly")],
         structuredContent={
             "owner": "example/Foo",
+            "assembly_format": assembly_format,
             "assembly_sha256": "a" * 64,
             "assembly": ".method public run ()V {\n    return\n}",
         },

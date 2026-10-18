@@ -45,6 +45,7 @@ class WorkerNotListening(WorkerLaunchError):
 class WorkerIdentity:
     plugin_build: str
     schema_fingerprint: str
+    recaf_commit: str | None = None
 
     def __post_init__(self) -> None:
         if not self.plugin_build:
@@ -54,6 +55,23 @@ class WorkerIdentity:
             for character in self.schema_fingerprint
         ):
             raise ValueError("schema_fingerprint must be lowercase SHA-256")
+
+
+def validate_recaf_runtime(
+    health: dict[str, Any], expected_commit: str | None = None,
+) -> str:
+    """Require Worker API compatibility and a consistent loaded Recaf revision."""
+    if health.get("recaf_compatible") is not True:
+        raise WorkerLaunchError(
+            "Worker Recaf runtime is incompatible or lacks compatibility metadata; "
+            "use a matching current plugin and Recaf generic JAR"
+        )
+    commit = health.get("recaf_commit")
+    if not isinstance(commit, str) or not commit.strip() or len(commit) > 200:
+        raise WorkerLaunchError("Worker Recaf runtime commit is missing or invalid")
+    if expected_commit is not None and commit != expected_commit:
+        raise WorkerLaunchError("Worker Recaf runtime changed since catalog discovery")
+    return commit
 
 
 class HealthProbe(Protocol):
@@ -284,10 +302,26 @@ class WorkerLauncher:
                         "workspace_archive_export_supported"
                     ]
                     effective_autosave_path: Path | None = paths.autosave_path
+                    output_format = (
+                        health.get("workspace_output_format")
+                        if archive_export_supported else None
+                    )
+                    if archive_export_supported:
+                        if autosave_path is None:
+                            effective_autosave_path = await self._reservations.set_autosave_format(
+                                sid, output_format,
+                            )
+                        elif (
+                            output_format in {"apk", "dex"}
+                            and paths.autosave_path.suffix.lower() != f".{output_format}"
+                        ):
+                            raise WorkerLaunchError(
+                                f"autosave_path extension must be .{output_format}"
+                            )
                     if not archive_export_supported:
                         if autosave_path is not None:
                             raise WorkerLaunchError(
-                                "autosave_path is unsupported for APK/DEX workspaces"
+                                "autosave_path is unsupported for this workspace format"
                             )
                         await self._reservations.disable_autosave(
                             sid,
@@ -306,6 +340,7 @@ class WorkerLauncher:
                         log_path=log_path,
                         last_touched=new_session_timestamp(),
                         idle_ttl_sec=ttl,
+                        output_format=output_format,
                     )
                     await self._sessions.activate(session)
                     activated = True
@@ -431,6 +466,7 @@ class WorkerLauncher:
             raise WorkerLaunchError("Worker input identity mismatch")
         if health.get("plugin_build") != self._expected_identity.plugin_build:
             raise WorkerLaunchError("Worker plugin build mismatch")
+        validate_recaf_runtime(health, self._expected_identity.recaf_commit)
         if not isinstance(
             health.get("workspace_archive_export_supported"),
             bool,
@@ -443,6 +479,11 @@ class WorkerLauncher:
             != self._expected_identity.schema_fingerprint
         ):
             raise WorkerLaunchError("Worker schema fingerprint mismatch")
+        if (
+            health.get("workspace_archive_export_supported") is True
+            and health.get("workspace_output_format") not in ("jar", "apk", "dex")
+        ):
+            raise WorkerLaunchError("Worker output format is missing or invalid")
 
     @staticmethod
     def _diagnostic_error(

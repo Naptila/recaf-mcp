@@ -29,4 +29,10 @@ expected stack inputs are all proven should it replace the call with an
 Keep discovery and rewrite as separate runs. Use `compile_only=true` for both
 sources before executing. A failed script is not rolled back automatically,
 so build replacements before `bundle.put`, avoid writes during discovery, and
-save to a new output JAR before overwriting any existing artifact.
+save to a new output JAR/APK/DEX before overwriting any existing artifact.
+
+For APK/DEX, use the native Android bundle/tree APIs described in the `workspace`
+topic rather than ASM. One script can traverse every primary DEX and replace many
+reviewed methods, then reinsert each changed class in its original bundle. Keep
+Dalvik register types, branch labels, exception regions, and debug labels valid;
+preserving an instruction's width alone does not establish semantic correctness.

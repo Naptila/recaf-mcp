@@ -12,10 +12,10 @@ public final class WorkerHealth {
     private final BooleanSupplier workspaceOpen;
     private final String expectedInputPath;
     private final String pluginBuild;
-    private final String recafVersion;
-    private final String recafCommit;
+    private final RecafRuntimeInfo recafRuntime;
     private final AtomicBoolean workspaceReady = new AtomicBoolean();
     private final AtomicBoolean workspaceArchiveExportSupported = new AtomicBoolean();
+    private final AtomicReference<String> workspaceOutputFormat = new AtomicReference<>();
     private final AtomicReference<String> actualInputPath = new AtomicReference<>();
     private final AtomicReference<String> startupError = new AtomicReference<>();
     private final AtomicReference<String> lastError = new AtomicReference<>();
@@ -25,11 +25,21 @@ public final class WorkerHealth {
                         String pluginBuild,
                         String recafVersion,
                         String recafCommit) {
+        this(workspaceOpen, expectedInputPath, pluginBuild,
+                new RecafRuntimeInfo(recafVersion, recafCommit, java.util.List.of()));
+    }
+
+    public WorkerHealth(BooleanSupplier workspaceOpen,
+                        String expectedInputPath,
+                        String pluginBuild,
+                        RecafRuntimeInfo recafRuntime) {
         this.workspaceOpen = Objects.requireNonNull(workspaceOpen);
         this.expectedInputPath = expectedInputPath;
         this.pluginBuild = Objects.requireNonNull(pluginBuild);
-        this.recafVersion = Objects.requireNonNull(recafVersion);
-        this.recafCommit = Objects.requireNonNull(recafCommit);
+        this.recafRuntime = Objects.requireNonNull(recafRuntime);
+        if (!recafRuntime.compatible()) {
+            setLastError("Incompatible Recaf runtime: " + String.join("; ", recafRuntime.errors()));
+        }
     }
 
     public void markWorkspaceReady(String inputPath) {
@@ -38,6 +48,10 @@ public final class WorkerHealth {
 
     public void markWorkspaceReady(String inputPath,
                                    boolean archiveExportSupported) {
+        markWorkspaceReady(inputPath, archiveExportSupported ? "jar" : null);
+    }
+
+    public void markWorkspaceReady(String inputPath, String outputFormat) {
         actualInputPath.set(inputPath);
         if (expectedInputPath == null) {
             setLastError("workspace opened without an expected input path");
@@ -47,7 +61,8 @@ public final class WorkerHealth {
             setLastError("workspace input path does not match the expected input path");
             return;
         }
-        workspaceArchiveExportSupported.set(archiveExportSupported);
+        workspaceArchiveExportSupported.set(outputFormat != null);
+        workspaceOutputFormat.set(outputFormat);
         workspaceReady.set(true);
     }
 
@@ -88,6 +103,10 @@ public final class WorkerHealth {
         return workspaceReady.get() && workspaceArchiveExportSupported.get();
     }
 
+    public String getWorkspaceOutputFormat() {
+        return workspaceReady.get() ? workspaceOutputFormat.get() : null;
+    }
+
     public String getExpectedInputPath() {
         return expectedInputPath;
     }
@@ -101,11 +120,15 @@ public final class WorkerHealth {
     }
 
     public String getRecafVersion() {
-        return recafVersion;
+        return recafRuntime.version();
     }
 
     public String getRecafCommit() {
-        return recafCommit;
+        return recafRuntime.commit();
+    }
+
+    public RecafRuntimeInfo getRecafRuntime() {
+        return recafRuntime;
     }
 
     public String getLastError() {

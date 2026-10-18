@@ -94,13 +94,13 @@ class FakeLauncher:
         autosave_path: str | Path | None = None,
         idle_ttl_sec: int | None = None,
     ) -> Session:
-        android = Path(input_path).suffix.lower() in {".apk", ".dex"}
-        if android and autosave_path is not None:
-            raise ValueError("autosave_path is unsupported for APK/DEX workspaces")
+        unsupported = Path(input_path).suffix.lower() == ".bin"
+        if unsupported and autosave_path is not None:
+            raise ValueError("autosave_path is unsupported for this workspace format")
         sid = await self.manager.reserve_slot()
         paths = await self.reservations.reserve(sid, input_path, autosave_path)
         effective_autosave = paths.autosave_path
-        if android:
+        if unsupported:
             await self.reservations.disable_autosave(
                 sid,
                 paths.autosave_path,
@@ -300,9 +300,9 @@ def test_service_discovers_once_and_routes_initial_session_tools(
     anyio.run(scenario)
 
 
-def test_android_session_defaults_to_close_without_export(tmp_path: Path) -> None:
-    input_path = tmp_path / "input.apk"
-    input_path.write_bytes(b"apk")
+def test_unsupported_session_defaults_to_close_without_export(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.bin"
+    input_path.write_bytes(b"unsupported")
     config = make_config(tmp_path)
     manager = SessionManager(1)
     reservations = PathReservations()
@@ -363,12 +363,12 @@ def test_android_session_defaults_to_close_without_export(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("trigger", ["bridge_shutdown", "idle_timeout"])
-def test_android_automatic_cleanup_never_exports(
+def test_unsupported_automatic_cleanup_never_exports(
     tmp_path: Path,
     trigger: str,
 ) -> None:
-    input_path = tmp_path / "input.apk"
-    input_path.write_bytes(b"apk")
+    input_path = tmp_path / "input.bin"
+    input_path.write_bytes(b"unsupported")
     config = make_config(tmp_path)
     manager = SessionManager(1)
     reservations = PathReservations()

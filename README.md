@@ -27,7 +27,7 @@ source checkout, modified Recaf build, or published Python package is needed.
 | Automate | Compile and run version-matched Recaf Java scripts for custom deobfuscation |
 | Manage sessions | Multiple isolated Workers, JAR save/reopen, format-aware idle cleanup, cancellation, and recovery |
 
-All 26 tools are advertised before a target is opened, so clients do not need
+All 27 tools are advertised before a target is opened, so clients do not need
 dynamic tool-list support. The complete tool catalog is shown below.
 
 ## Requirements
@@ -36,18 +36,26 @@ dynamic tool-list support. The complete tool catalog is shown below.
   emits Java 22-compatible bytecode; `patch_class` requires a JDK with `javac`,
   not a JRE.
 - A Recaf 4 generic executable JAR, which bundles Recaf's runtime dependencies.
-  Version 1.0.2 targets [Recaf build `17216bd3`](https://github.com/Col-E/Recaf/commit/17216bd3b76bc6ef36c4198262b5318e2936fbb7)
+  Version 1.1.0 targets [Recaf build `17216bd3`](https://github.com/Col-E/Recaf/commit/17216bd3b76bc6ef36c4198262b5318e2936fbb7)
   (2026-10-14) and its assembler/DEX APIs. Update older Recaf snapshots before
   upgrading the plugin.
 - Python 3.11 or newer.
 - [`uv`](https://docs.astral.sh/uv/) for the locked Bridge environment.
+
+The Worker checks the Jasm and DEX APIs it requires at startup. Incompatible
+runtimes are rejected before a session becomes ready. `get_recaf_script_help`
+reports the loaded JAR as `recaf_version` / `recaf_commit` and the plugin's
+compile-time baseline as `recaf_build_version` / `recaf_build_commit`, alongside
+`recaf_compatible` and `recaf_compatibility_errors`. These are API checks, not a
+guarantee for every future snapshot. Restart the Bridge after changing the
+Recaf JAR; it rejects Workers whose revision differs from catalog discovery.
 
 ## Install
 
 ### Install from a Release (recommended)
 
 No source checkout or local build is required. Download the
-[`recaf-mcp-plugin-1.0.2.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.0.2/recaf-mcp-plugin-1.0.2.jar)
+[`recaf-mcp-plugin-1.1.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf-mcp-plugin-1.1.0.jar)
 asset from the [latest GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
 and copy it into Recaf's plugin directory:
 
@@ -60,11 +68,16 @@ and copy it into Recaf's plugin directory:
 Install the cross-platform Bridge wheel directly from the same Release:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.2/recaf_mcp_bridge-1.0.2-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf_mcp_bridge-1.1.0-py3-none-any.whl
 ```
 
 This installs the `recaf-mcp-bridge` command without publishing the project to
 PyPI.
+
+When upgrading, back up the old plugin JAR outside Recaf's plugin directory and
+keep exactly one `recaf-mcp-plugin*.jar` there. Reinstall the Bridge wheel with
+`uv tool install --force` followed by the URL above, then restart the MCP
+connection and reopen workspaces so both components use 1.1.0.
 
 ### Build from source
 
@@ -74,7 +87,7 @@ To build the plugin and install the Bridge from a checkout instead:
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.0.2.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.1.0.jar ~/.config/Recaf/plugins/
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```
@@ -132,13 +145,13 @@ reported by `command -v recaf-mcp-bridge`.
 | 2 | `recaf_open(input_path="/absolute/target.jar")` | Returns an opaque `database` ID |
 | 3 | `workspace_info(database=...)` | Summarizes the loaded target |
 | 4 | `list_classes(database=...)` or another analysis tool | Begins analysis |
-| 5 | `recaf_save(database=..., output_path=...)` | Writes a modified JAR |
-| 6 | `recaf_close(database=...)` | Saves a JAR, or closes an APK/DEX without export |
+| 5 | `recaf_save(database=..., output_path=...)` | Writes the modified JAR/APK/DEX |
+| 6 | `recaf_close(database=...)` | Saves and closes the session |
 
 All lifecycle paths must be absolute. Pass the returned `database` to every
-Worker tool. With `save` omitted, `recaf_close` saves JAR changes but closes
-APK/DEX sessions without exporting a JAR. Use `save=false` to discard JAR
-changes; Android archive saving is rejected explicitly.
+Worker tool. With `save` omitted, `recaf_close` saves supported JAR/APK/DEX
+inputs in their detected format. Use `save=false` to discard changes. APK
+exports are unsigned; sign them separately before installation.
 
 ## Configuration
 
@@ -156,7 +169,7 @@ token is present, so the installed plugin remains dormant.
 | `RECAF_JAVA_COMMAND` | `java` | JDK executable used for Workers |
 | `RECAF_MAX_SESSIONS` | `2` | Concurrent pending/ready Worker cap, 1–32 |
 | `RECAF_WORKER_MAX_HEAP_MB` | `1024` | Per-Worker maximum heap, at least 128 MiB |
-| `RECAF_IDLE_TTL_SEC` | `600` | Idle cleanup time: autosave JARs, close APK/DEX without export; `0` disables it |
+| `RECAF_IDLE_TTL_SEC` | `600` | Idle cleanup time: autosave supported JAR/APK/DEX inputs; `0` disables it |
 | `RECAF_RESPONSE_PROFILE` | `compact` | `compact` avoids duplicate JSON text; `legacy` restores it |
 | `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | Worker launch readiness deadline |
 | `RECAF_SESSION_ROOT` | system temp | Owner-only live session directory |
@@ -179,11 +192,11 @@ by `recaf_open`.
 
 | Tool | Purpose | Key behavior |
 | --- | --- | --- |
-| `recaf_open` | Open a JAR or APK | Returns `database`, save capability, and a nullable autosave path |
+| `recaf_open` | Open a JAR, APK, or DEX | Returns `database`, save capability, and a nullable autosave path |
 | `recaf_list` | List open sessions | Safe installation smoke test |
 | `set_idle_ttl` | Change idle timeout | `0` disables automatic idle cleanup |
-| `recaf_save` | Export a modified JAR | Atomic output; APK/DEX save is unsupported |
-| `recaf_close` | Close a session | Omitted `save` saves JARs and never exports APK/DEX |
+| `recaf_save` | Export JAR/APK/DEX | Atomic output in the original format; APK output is unsigned |
+| `recaf_close` | Close a session | Omitted `save` saves JAR/APK/DEX; `save=false` discards |
 
 ### Browse and decompile
 
@@ -205,19 +218,37 @@ by `recaf_open`.
 | `search_instructions` | Search JVM/DEX instructions | Fast whole-archive search; no decompilation |
 | `search_code` | Search decompiled source | Narrow with `filter`; explicit opt-in above 200 classes |
 | `search_members` | Find field/method declarations and references | Owner/name/descriptor, kind, result type |
+| `search_structure` | Find classes by combined structure | Class/member names, access masks, descriptors, native opcodes |
 | `call_graph` | Find callers and callees | Direction, depth, JVM/Android scope |
+
+`search_structure` uses Recaf's native JVM/DEX structural query engine without
+decompilation. For example, `{"database":"<id>","scope":"android","query":
+{"methods":[{"name":"greet","descriptor":"()V","opcodes":[26,14]}]}}`
+finds classes declaring `greet()V` with DEX `const-string` and `return-void`.
+Constraints are combined with AND; opcode numbers belong to the selected VM.
+Field/method arrays require distinct members, and `[]` requires none. Results
+include `class_scope` and `dex_name`; use `offset`/`limit` for stable pages.
 
 ### Rename and patch
 
 | Tool | Purpose | Key behavior |
 | --- | --- | --- |
-| `rename_symbol` | Rename a class, method, or field | Descriptor-aware; JVM or in-memory Android |
+| `rename_symbol` | Rename a class, method, or field | Descriptor-aware; JVM or Android |
 | `apply_mappings` | Import mappings | Enigma, Jadx, Proguard, Simple, SRG, Tiny v1/v2 |
 | `export_mappings` | Export accumulated mappings | Paged UTF-8 text with counts and SHA-256 |
-| `transform_workspace` | Run reviewed Recaf transforms | JVM only; supports `dry_run` |
+| `transform_workspace` | Run reviewed Recaf transforms | JVM only; typed `options`, ordered `phases`, `dry_run` |
 | `patch_class` | Compile replacement Java source | JVM only; preserves classfile target by default |
-| `get_method_assembly` | Read exact method instructions | Editable JVM Jasm; read-only Android DEX text |
-| `patch_instructions` | Assemble a modified JVM method | Complete assembly plus prior SHA-256; supports `dry_run` |
+| `get_method_assembly` | Read exact method instructions | Editable JVM or Dalvik Jasm; `scope` and exact `dex_name` |
+| `patch_instructions` | Assemble a modified JVM or Dalvik method | Complete assembly plus prior SHA-256; supports `dry_run` |
+
+`transform_workspace` keeps its conservative metadata cleanup defaults. Extra
+constant/predicate/variable folding, static/call/`invokedynamic` inlining, long
+metadata removal, catch merging, and variable-table normalization require an
+explicit transformer alias. Use `options` for per-run settings, or `phases`
+for an ordered plan with separate aliases, options, and up to three passes per
+phase. The whole plan runs on a detached JVM snapshot; dry runs and failed
+plans leave the current workspace unchanged. See the [Bridge contract](recaf-mcp-bridge/README.md)
+for aliases, parameter ranges, phase results, and an example.
 
 ### Custom Recaf scripts
 
@@ -226,11 +257,25 @@ by `recaf_open`.
 | `get_recaf_script_help` | Get version-matched examples | Workspace, ASM, services, deobfuscation |
 | `run_recaf_script` | Compile or run Recaf Java code | Compile-only by default; execution requires explicit acknowledgement |
 
+Android scripts can batch edits across primary DEX bundles using native DEX
+trees, then reinsert rebuilt `AndroidClassInfo` objects with `bundle.put`.
+Script change reports include primary JVM and Android bundle events. Read the
+`workspace` topic from `get_recaf_script_help` for a complete instruction replacement,
+method-map traversal, and invoke-range arguments. Editing converted JVM views does
+not change the saved DEX. Save explicitly and sign APK output.
+
+Class edits appear in `modified_classes` and the other change lists.
+`workspace_changed` only reports replacement or closure of the current workspace
+object, so it normally stays false during edits. Runtime failures include a bounded
+`runtime_error_chain` with stack frames and `runtime_root_cause_type` /
+`runtime_root_cause_message` when the chain is complete.
+
 ### Common behavior
 
 | Topic | Behavior |
 | --- | --- |
 | Matching | Search text is a case-sensitive substring by default; `regex=true` enables partial Java regex |
+| Structural matching | `search_structure` names are exact by default; nested `regex=true` enables partial regex |
 | Scope | `jvm` is the default; Android-aware tools accept `android`, and scan/export tools also accept `all` |
 | Pagination | Class/file lists default to 20; searches/graphs to 10; large text/byte content to 32 Ki units |
 | Decompilers | `tools/list` publishes the installed names and default; the tested Recaf JAR exposes CFR, Fallback, Procyon, and Vineflower |
@@ -250,17 +295,32 @@ whether an LLM context compaction discarded the caller's cached body.
 | Browse, search, call graph | Yes | Yes |
 | Decompile class / export source ZIP | Yes | Yes, through Android-to-JVM conversion |
 | Read bytecode | Original classfile | Reconstructed single-class DEX |
-| Rename / apply mappings | Persistent after JAR save | In-memory session only |
-| Patch source or instructions | Yes | No |
+| Rename / apply mappings | Persistent after save | Persistent after save |
+| Patch Java source | Yes | No |
+| Patch method instructions | Yes | Yes, editable Dalvik Jasm |
 | Transform workspace | Yes | No |
-| Save/rebuild archive | Yes | No |
+| Save/rebuild archive | Yes | Yes; APK output is unsigned |
+
+Android import preserves compact signed and floating-point encoded values, modeled
+parameter/line/local debug tables, and explicit inner-class access flags. Before
+installing an exported DEX or APK, the Worker checks class/member sets, static
+field values, and modeled debug tables against the workspace. These checks do
+not execute the APK. Class renames update type and member-owner references across
+primary DEX bundles.
+
+Java source tools use detached, verified JVM views with corrected array conversion
+and a verified fallback converter. Source conversion does not replace DEX method
+bodies. `transform_workspace` returns an explicit error for Android-only inputs.
+Editable Dalvik Jasm uses physical registers and keeps existing debug metadata
+outside the edited text. Keep labels referenced by that metadata when patching;
+removing a required label is rejected before changing the workspace.
 
 ### Important boundaries
 
 | Topic | Rule |
 | --- | --- |
 | JAR mutations | Stay in memory until `recaf_save` or a saving `recaf_close` |
-| APK sessions | Analysis and in-memory mappings only; no autosave path is created, and default close/idle/shutdown cleanup never exports a JAR |
+| APK/DEX sessions | Saved in the detected input format on close/idle/shutdown; autosave uses `.apk`/`.dex`. APK signatures are removed; signing is a separate step |
 | `read_file` | Reads only exact entries in the open archive, never arbitrary host paths |
 | `export_sources` | Requires an absolute output path and installs a validated ZIP atomically |
 | Recaf scripts | Have full Worker filesystem/network/process access and are not transactional |
@@ -284,6 +344,25 @@ uv run pytest -q
 The opt-in real suite additionally starts installed Recaf Workers and exercises
 open, analysis, mutation, paged retrieval, save, reopen, cancellation cleanup,
 format-aware idle/shutdown cleanup, and authenticated recovery.
+
+Run it against an explicit generic JAR from the Bridge directory:
+
+```bash
+uv run --frozen python ../scripts/test_real_worker.py \
+  --recaf-jar /absolute/path/to/recaf.jar \
+  --plugin-jar ../recaf-mcp-plugin/build/libs/recaf-mcp-plugin-1.1.0.jar
+```
+
+The runner discovers Worker identity automatically, copies its input to a
+temporary directory, generates small multi-DEX APK, raw DEX, and runnable JVM
+transformation fixtures, and
+cleans up Workers. Optional reference APK and large
+JAR tests still require their `RECAF_MCP_TEST_ANDROID_INPUT` and
+`RECAF_MCP_TEST_REFERENCE_INPUT` fixtures. CI runs unit tests on Linux/Windows
+and the real suite on Linux for pull requests, main pushes, and release tags.
+It builds the generic runtime from the commit pinned in `build.gradle`.
+The separate weekly/manual compatibility workflow tests upstream `master`;
+publishing remains restricted to version tag pushes.
 
 ## Troubleshooting
 

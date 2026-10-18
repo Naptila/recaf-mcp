@@ -17,18 +17,29 @@ import software.coley.recaf.services.deobfuscation.transform.generic.IllegalSign
 import software.coley.recaf.services.deobfuscation.transform.generic.IllegalVarargsRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.RedundantTryCatchRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.UnknownAttributeRemovingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.CallResultInliningTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.DuplicateCatchMergingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.InvokeDynamicInliningTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.LongAnnotationRemovingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.LongExceptionRemovingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.OpaqueConstantFoldingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.OpaquePredicateFoldingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.StaticValueInliningTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.VariableFoldingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.VariableTableNormalizingTransformer;
 import software.coley.recaf.services.transform.JvmClassTransformer;
 import software.coley.recaf.services.transform.JvmTransformResult;
 import software.coley.recaf.services.transform.TransformationApplier;
 import software.coley.recaf.services.transform.TransformationApplierService;
 import software.coley.recaf.services.transform.TransformationFeedback;
+import software.coley.recaf.services.transform.TransformationPlan;
+import software.coley.recaf.services.transform.TransformationPhase;
 import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.ClassBundle;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -45,7 +56,7 @@ import java.util.function.Supplier;
 public final class TransformWorkspaceTool implements McpTool {
     private static final int DEFAULT_LIMIT = 100;
     private static final int MAX_LIMIT = 200;
-    private static final int MAX_PASSES = 3;
+    static final int MAX_PASSES = 3;
     private static final int MAX_FAILURE_DETAILS = 100;
     private static final int MAX_ERROR_LENGTH = 500;
     private static final Set<String> ARGUMENTS = Set.of(
@@ -54,7 +65,7 @@ public final class TransformWorkspaceTool implements McpTool {
             "max_passes",
             "dry_run",
             "offset",
-            "limit"
+            "limit", "options", "phases"
     );
     private static final Map<String, Class<? extends JvmClassTransformer>> ALLOWED = allowed();
     private static final List<String> SAFE_DEFAULTS = List.of(
@@ -107,10 +118,16 @@ public final class TransformWorkspaceTool implements McpTool {
         if (!hasWorkspace.getAsBoolean()) {
             return error("workspace not open", request, null);
         }
+        Workspace workspace = workspaceSupplier.get();
+        if (workspace.getPrimaryResource().getJvmClassBundle().isEmpty()
+                && !workspace.getPrimaryResource().getAndroidClassBundles().isEmpty()) {
+            return error("transform_workspace supports JVM classes; Android/DEX transformations are not supported",
+                    request, null);
+        }
 
         TransformSummary summary;
         try {
-            summary = transformOperation.run(workspaceSupplier.get(), request);
+            summary = transformOperation.run(workspace, request);
         } catch (Exception ex) {
             ToolCancellation.propagateIfRequested(ex);
             return error("workspace transformation failed: " + exceptionMessage(ex), request, null);
@@ -135,92 +152,86 @@ public final class TransformWorkspaceTool implements McpTool {
     private static TransformSummary transform(Workspace workspace,
                                               TransformRequest request,
                                               TransformationApplierService service) throws Exception {
-        TransformationApplier applier = service.newApplier(workspace);
-        applier.setMaxPasses(request.maxPasses());
-        List<Class<? extends JvmClassTransformer>> transformers = request.transformers()
-                .stream()
-                .map(ALLOWED::get)
-                .toList();
-        WorkspaceResource primary = workspace.getPrimaryResource();
-        TransformationFeedback feedback = new TransformationFeedback() {
-            @Override
-            public boolean hasRequestedCancellation() {
-                return ToolCancellation.requested();
-            }
+        try (var snapshot = new TransformationWorkspaceSupport(workspace)) {
+            Workspace detached = snapshot.workspace();
+            TransformationApplier applier = service.newApplier(detached);
+            applier.setDropFaultyClasses(false);
+            TransformationPlan plan = new TransformationPlan(request.phases().stream().map(phase ->
+                    new TransformationPhase(phase.id(), phase.maxPasses(),
+                            phase.transformers().stream().map(ALLOWED::get).toList(), phase.parameters())).toList());
+            TransformationFeedback feedback = new TransformationFeedback() {
+                @Override
+                public boolean hasRequestedCancellation() {
+                    return ToolCancellation.requested();
+                }
 
-            @Override
-            public boolean shouldTransform(Workspace currentWorkspace,
-                                           WorkspaceResource resource,
-                                           ClassBundle<?> bundle,
-                                           ClassInfo classInfo,
-                                           software.coley.recaf.services.transform.ClassTransformer transformer,
-                                           int pass) {
-                return resource == primary
-                        && classInfo.isJvmClass()
-                        && (request.classPrefix() == null
-                        || classInfo.getName().startsWith(request.classPrefix()));
-            }
-        };
-        JvmTransformResult result = applier.transformJvm(transformers, feedback);
-
-        List<String> modifiedClasses = result.getTransformedClasses()
-                .keySet()
-                .stream()
-                .map(path -> path.getValue().getName())
-                .distinct()
-                .sorted()
-                .toList();
-        List<String> removedClasses = result.getClassesToRemove()
-                .stream()
-                .map(path -> path.getValue().getName())
-                .distinct()
-                .sorted()
-                .toList();
-
-        Map<String, Integer> modifications = new LinkedHashMap<>();
-        result.getModifiedClassesPerTransformer().entrySet().stream()
-                .sorted(Comparator.comparing(entry -> alias(entry.getKey())))
-                .forEach(entry -> modifications.put(
-                        alias(entry.getKey()),
-                        entry.getValue().size()
-                ));
-
-        List<TransformFailure> failures = new ArrayList<>();
-        result.getTransformerFailures().entrySet().stream()
-                .sorted(Comparator.comparing(entry -> entry.getKey().getValue().getName()))
-                .forEach(classEntry -> classEntry.getValue().entrySet().stream()
-                        .sorted(Comparator.comparing(entry -> alias(entry.getKey())))
-                        .forEach(failure -> failures.add(new TransformFailure(
-                                classEntry.getKey().getValue().getName(),
-                                alias(failure.getKey()),
-                                exceptionMessage(failure.getValue())
-                        ))));
-
-        var mappings = result.getMappingsToApply();
-        MappingCounts mappingCounts = new MappingCounts(
-                mappings.getClasses().size(),
-                mappings.getFields().values().stream().mapToInt(Collection::size).sum(),
-                mappings.getMethods().values().stream().mapToInt(Collection::size).sum(),
-                mappings.getVariables().values().stream().mapToInt(Collection::size).sum()
-        );
-        boolean applied = !request.dryRun() && failures.isEmpty();
-        if (applied) {
+                @Override
+                public boolean shouldTransform(Workspace currentWorkspace, WorkspaceResource resource,
+                                               ClassBundle<?> bundle, ClassInfo info,
+                                               software.coley.recaf.services.transform.ClassTransformer transformer, int pass) {
+                    return resource == detached.getPrimaryResource() && snapshot.isPrimaryBundle(bundle)
+                            && info.isJvmClass() && (request.classPrefix() == null
+                            || info.getName().startsWith(request.classPrefix()));
+                }
+            };
+            var result = applier.transformJvm(plan, feedback);
             ToolCancellation.check();
-            result.apply();
+            Map<String, Set<String>> modifiedByTransformer = new java.util.TreeMap<>();
+            Set<String> plannedModified = new java.util.TreeSet<>();
+            Set<String> plannedRemoved = new java.util.TreeSet<>();
+            List<TransformFailure> failures = new ArrayList<>();
+            List<PhaseSummary> phases = new ArrayList<>();
+            for (var phase : result.phaseResults()) {
+                JvmTransformResult output = phase.result();
+                int modifiedCount = 0;
+                int removedCount = 0;
+                if (output != null) {
+                    output.getTransformedClasses().keySet().forEach(path -> plannedModified.add(path.getValue().getName()));
+                    output.getClassesToRemove().forEach(path -> plannedRemoved.add(path.getValue().getName()));
+                    modifiedCount = output.getTransformedClasses().size();
+                    removedCount = output.getClassesToRemove().size();
+                    output.getModifiedClassesPerTransformer().forEach((type, paths) -> {
+                        Set<String> names = modifiedByTransformer.computeIfAbsent(alias(type), ignored -> new java.util.TreeSet<>());
+                        paths.forEach(path -> names.add(path.getValue().getName()));
+                    });
+                    output.getTransformerFailures().forEach((path, errors) -> errors.forEach((type, failure) ->
+                            failures.add(new TransformFailure(path.getValue().getName(), alias(type), exceptionMessage(failure)))));
+                    if (!output.getMappingsToApply().isEmpty()) {
+                        throw new IllegalStateException("allowlisted transformation unexpectedly produced mappings");
+                    }
+                }
+                if (!phase.status().isSuccess() && !phase.status().name().equals("SKIPPED")
+                        && (output == null || output.getTransformerFailures().isEmpty())) {
+                    failures.add(new TransformFailure(null, "phase:" + phase.phase().id(), phase.status().name()));
+                }
+                phases.add(new PhaseSummary(phase.phase().id(), phase.status().name().toLowerCase(java.util.Locale.ROOT),
+                        phase.passes(), modifiedCount, removedCount));
+            }
+            failures.sort(Comparator.comparing(TransformFailure::className, Comparator.nullsFirst(String::compareTo))
+                    .thenComparing(TransformFailure::transformer));
+            Map<String, Integer> modifications = new LinkedHashMap<>();
+            modifiedByTransformer.forEach((alias, names) -> modifications.put(alias, names.size()));
+            boolean complete = result.isComplete() && failures.isEmpty();
+            List<String> modified = List.copyOf(plannedModified);
+            List<String> removed = List.copyOf(plannedRemoved);
+            if (complete) {
+                // Only the final phase remains unapplied; earlier phases modified the isolated snapshot.
+                result.apply();
+                modified = snapshot.modifiedClasses(request.classPrefix());
+                removed = snapshot.removedClasses(request.classPrefix());
+                if (!request.dryRun()) {
+                    snapshot.commit(request.classPrefix());
+                }
+            }
+            return new TransformSummary(modified, removed, modifications, failures,
+                    new MappingCounts(0, 0, 0, 0), complete && !request.dryRun(), phases);
         }
-        return new TransformSummary(
-                modifiedClasses,
-                removedClasses,
-                modifications,
-                failures,
-                mappingCounts,
-                applied
-        );
     }
 
     private static TransformRequest parseRequest(JsonObject arguments) {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
-        List<String> transformers = parseTransformers(arguments.get("transformers"));
+        List<TransformationPlanSupport.Phase> phases = TransformationPlanSupport.parse(arguments);
+        List<String> transformers = phases.stream().flatMap(phase -> phase.transformers().stream()).distinct().toList();
         String classPrefix = ToolArguments.optionalString(arguments, "class_prefix");
         int maxPasses = ToolArguments.integer(arguments, "max_passes", 1, 1, MAX_PASSES);
         boolean dryRun = ToolArguments.bool(arguments, "dry_run", false);
@@ -232,11 +243,12 @@ public final class TransformWorkspaceTool implements McpTool {
                 maxPasses,
                 dryRun,
                 offset,
-                limit
+                limit,
+                phases
         );
     }
 
-    private static List<String> parseTransformers(JsonElement element) {
+    static List<String> parseTransformers(JsonElement element) {
         if (element == null) {
             return SAFE_DEFAULTS;
         }
@@ -268,6 +280,10 @@ public final class TransformWorkspaceTool implements McpTool {
         JsonObject structured = summary == null
                 ? requestJson(request)
                 : summaryJson(request, summary);
+        structured.addProperty("applied", false);
+        if (summary == null) {
+            structured.add("phase_results", new JsonArray());
+        }
         structured.addProperty("error", message);
         return McpTool.errorResult(message, structured);
     }
@@ -279,6 +295,17 @@ public final class TransformWorkspaceTool implements McpTool {
         structured.addProperty("modified_class_count", summary.modifiedClasses().size());
         structured.addProperty("removed_class_count", summary.removedClasses().size());
         structured.addProperty("failure_count", summary.failureCount());
+        JsonArray phaseResults = new JsonArray();
+        summary.phases().forEach(phase -> {
+            JsonObject json = new JsonObject();
+            json.addProperty("id", phase.id());
+            json.addProperty("status", phase.status());
+            json.addProperty("passes", phase.passes());
+            json.addProperty("modified_class_count", phase.modifiedClasses());
+            json.addProperty("removed_class_count", phase.removedClasses());
+            phaseResults.add(json);
+        });
+        structured.add("phase_results", phaseResults);
 
         int start = Math.min(request.offset(), summary.modifiedClasses().size());
         int end = Math.min(start + request.limit(), summary.modifiedClasses().size());
@@ -332,6 +359,7 @@ public final class TransformWorkspaceTool implements McpTool {
         JsonArray transformers = new JsonArray();
         request.transformers().forEach(transformers::add);
         json.add("transformers", transformers);
+        json.add("phases", TransformationPlanSupport.toJson(request.phases()));
         if (request.classPrefix() == null) {
             json.add("class_prefix", JsonNull.INSTANCE);
         } else {
@@ -378,6 +406,16 @@ public final class TransformWorkspaceTool implements McpTool {
         allowed.put("dead_code", DeadCodeRemovingTransformer.class);
         allowed.put("goto_inlining", GotoInliningTransformer.class);
         allowed.put("redundant_try_catch", RedundantTryCatchRemovingTransformer.class);
+        allowed.put("long_annotations", LongAnnotationRemovingTransformer.class);
+        allowed.put("long_exceptions", LongExceptionRemovingTransformer.class);
+        allowed.put("duplicate_catches", DuplicateCatchMergingTransformer.class);
+        allowed.put("variable_table_normalization", VariableTableNormalizingTransformer.class);
+        allowed.put("opaque_constants", OpaqueConstantFoldingTransformer.class);
+        allowed.put("opaque_predicates", OpaquePredicateFoldingTransformer.class);
+        allowed.put("variable_folding", VariableFoldingTransformer.class);
+        allowed.put("static_value_inlining", StaticValueInliningTransformer.class);
+        allowed.put("call_result_inlining", CallResultInliningTransformer.class);
+        allowed.put("invokedynamic_inlining", InvokeDynamicInliningTransformer.class);
         return Map.copyOf(allowed);
     }
 
@@ -406,6 +444,9 @@ public final class TransformWorkspaceTool implements McpTool {
         prefix.addProperty("description", "Optional JVM internal-name prefix scope.");
         properties.add("class_prefix", prefix);
         properties.add("max_passes", integerProperty(1, MAX_PASSES, 1));
+        properties.add("options", TransformationPlanSupport.optionsSchema());
+        properties.add("phases", TransformationPlanSupport.phasesSchema(
+                transformers, properties.getAsJsonObject("max_passes")));
         JsonObject dryRun = new JsonObject();
         dryRun.addProperty("type", "boolean");
         dryRun.addProperty("default", false);
@@ -445,7 +486,8 @@ public final class TransformWorkspaceTool implements McpTool {
                             int maxPasses,
                             boolean dryRun,
                             int offset,
-                            int limit) {
+                            int limit,
+                            List<TransformationPlanSupport.Phase> phases) {
     }
 
     record TransformFailure(String className, String transformer, String message) {
@@ -459,11 +501,19 @@ public final class TransformWorkspaceTool implements McpTool {
                             Map<String, Integer> modifications,
                             List<TransformFailure> failures,
                             MappingCounts mappingCounts,
-                            boolean applied) {
+                            boolean applied,
+                            List<PhaseSummary> phases) {
+        TransformSummary(List<String> modifiedClasses, List<String> removedClasses,
+                         Map<String, Integer> modifications, List<TransformFailure> failures,
+                         MappingCounts mappingCounts, boolean applied) {
+            this(modifiedClasses, removedClasses, modifications, failures, mappingCounts, applied, List.of());
+        }
         private int failureCount() {
             return failures.size();
         }
     }
+
+    record PhaseSummary(String id, String status, int passes, int modifiedClasses, int removedClasses) {}
 
     @FunctionalInterface
     interface TransformOperation {

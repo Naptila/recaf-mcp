@@ -6,6 +6,8 @@ import me.naptila.recafmcp.mcp.McpHttpServer;
 import me.naptila.recafmcp.mcp.McpRequestHandler;
 import me.naptila.recafmcp.mcp.McpToolRegistry;
 import me.naptila.recafmcp.mcp.WorkerHealth;
+import me.naptila.recafmcp.mcp.RecafRuntimeInfo;
+import me.naptila.recafmcp.mcp.android.AndroidWorkspaceSupport;
 import me.naptila.recafmcp.mcp.WorkerOperationCoordinator;
 import me.naptila.recafmcp.mcp.internal.HealthHandler;
 import me.naptila.recafmcp.mcp.internal.RecafHeadlessServicesProbe;
@@ -30,10 +32,10 @@ import me.naptila.recafmcp.mcp.tools.SearchCodeTool;
 import me.naptila.recafmcp.mcp.tools.SearchInstructionsTool;
 import me.naptila.recafmcp.mcp.tools.SearchMembersTool;
 import me.naptila.recafmcp.mcp.tools.SearchStringsTool;
+import me.naptila.recafmcp.mcp.tools.SearchStructureTool;
 import me.naptila.recafmcp.mcp.tools.TransformWorkspaceTool;
 import me.naptila.recafmcp.mcp.tools.WorkspaceInfoTool;
 import org.slf4j.Logger;
-import software.coley.recaf.RecafBuildConfig;
 import software.coley.recaf.analytics.logging.Logging;
 import software.coley.recaf.info.properties.builtin.InputFilePathProperty;
 import software.coley.recaf.launch.LaunchArguments;
@@ -72,7 +74,7 @@ import java.util.List;
 )
 public class RecafMCPPlugin implements Plugin {
     public static final String PLUGIN_ID = "me.naptila.recaf-mcp-plugin";
-    public static final String PLUGIN_VERSION = "1.0.2";
+    public static final String PLUGIN_VERSION = "1.1.0";
     public static final String PLUGIN_NAME = "Recaf MCP Plugin";
     public static final String PLUGIN_DESCRIPTION =
             "MCP server for autonomous Java reverse engineering via LLM agents";
@@ -142,8 +144,7 @@ public class RecafMCPPlugin implements Plugin {
                 workspaceManager::hasCurrentWorkspace,
                 expectedInputPath == null ? null : expectedInputPath.toString(),
                 PLUGIN_VERSION,
-                RecafBuildConfig.VERSION,
-                RecafBuildConfig.GIT_SHA
+                RecafRuntimeInfo.current()
         );
         validateExpectedInput(expectedInputPath, health);
 
@@ -165,7 +166,7 @@ public class RecafMCPPlugin implements Plugin {
 
         int requestedPort = Integer.getInteger("recaf.mcp.port", 0);
         try {
-            McpToolRegistry toolRegistry = new McpToolRegistry(List.of(
+            McpToolRegistry toolRegistry = new McpToolRegistry(health.getRecafRuntime().compatible() ? List.of(
                     new WorkspaceInfoTool(workspaceManager),
                     new ListClassesTool(workspaceManager),
                     new ListFilesTool(workspaceManager),
@@ -188,6 +189,7 @@ public class RecafMCPPlugin implements Plugin {
                             stringPredicateProvider
                     ),
                     new SearchCodeTool(workspaceManager, decompilerManager),
+                    new SearchStructureTool(workspaceManager),
                     new RenameSymbolTool(
                             workspaceManager,
                             mappingApplierService,
@@ -218,7 +220,7 @@ public class RecafMCPPlugin implements Plugin {
                     new GetClassBytecodeTool(workspaceManager),
                     new GetRecafScriptHelpTool(),
                     new RunRecafScriptTool(workspaceManager, scriptEngine)
-            ));
+            ) : List.of(new GetRecafScriptHelpTool()));
             operationCoordinator = new WorkerOperationCoordinator();
             McpRequestHandler requestHandler = new McpRequestHandler(
                     health,
@@ -287,9 +289,16 @@ public class RecafMCPPlugin implements Plugin {
             health.setLastError("workspace primary resource has no input path");
             return;
         }
+        try {
+            AndroidWorkspaceSupport.prepare(workspace);
+        } catch (IOException | RuntimeException ex) {
+            logger.error("Failed to prepare Android workspace without data loss", ex);
+            health.setLastError("Android workspace preparation failed: " + ex.getMessage());
+            return;
+        }
         health.markWorkspaceReady(
                 canonicalize(inputPath).toString(),
-                RecafSaveWorkspaceHandler.supportsArchiveExport(workspace)
+                RecafSaveWorkspaceHandler.outputFormat(workspace)
         );
     }
 

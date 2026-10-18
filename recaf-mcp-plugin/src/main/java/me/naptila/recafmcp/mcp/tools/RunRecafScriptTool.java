@@ -9,6 +9,7 @@ import com.google.gson.JsonParser;
 import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
+import software.coley.recaf.info.AndroidClassInfo;
 import software.coley.recaf.info.JvmClassInfo;
 import software.coley.recaf.services.compile.CompilerDiagnostic;
 import software.coley.recaf.services.script.GenerateResult;
@@ -17,7 +18,10 @@ import software.coley.recaf.services.script.ScriptResult;
 import software.coley.recaf.services.script.ScriptSourceAugmentation;
 import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.workspace.model.Workspace;
+import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
+import software.coley.recaf.workspace.model.bundle.ClassBundle;
 import software.coley.recaf.workspace.model.bundle.JvmClassBundle;
+import software.coley.recaf.workspace.model.resource.ResourceAndroidClassListener;
 import software.coley.recaf.workspace.model.resource.ResourceJvmClassListener;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
@@ -28,11 +32,15 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -49,6 +57,9 @@ public final class RunRecafScriptTool implements McpTool {
     private static final int MAX_DIAGNOSTICS = 100;
     private static final int MAX_DIAGNOSTIC_MESSAGE = 1_000;
     private static final int MAX_ERROR_MESSAGE = 1_000;
+    private static final int MAX_RUNTIME_CAUSES = 8;
+    private static final int MAX_RUNTIME_STACK_FRAMES = 12;
+    private static final int MAX_STACK_FRAME_LENGTH = 500;
     private static final int DEFAULT_LIMIT = 100;
     private static final int MAX_LIMIT = 200;
     private static final String RESULT_PREFIX = "MCP_RESULT ";
@@ -94,7 +105,8 @@ public final class RunRecafScriptTool implements McpTool {
 
     @Override
     public String description() {
-        return "Compile or explicitly run a high-privilege generic Recaf Java script.";
+        return "Compile or explicitly run a high-privilege Recaf Java script for JVM or Android DEX; "
+                + "read get_recaf_script_help (workspace) for native DEX edits.";
     }
 
     @Override
@@ -114,7 +126,9 @@ public final class RunRecafScriptTool implements McpTool {
             execution = operation.run(workspaceSupplier.get(), request);
         } catch (Exception ex) {
             ToolCancellation.propagateIfRequested(ex);
-            return error("Recaf script operation failed: " + exceptionMessage(ex), request, null);
+            JsonObject result = error("Recaf script operation failed: " + exceptionMessage(ex), request, null);
+            addRuntimeFailure(result.getAsJsonObject("structuredContent"), describeRuntimeFailure(ex));
+            return result;
         }
 
         JsonObject structured = resultJson(request, execution);
@@ -129,7 +143,7 @@ public final class RunRecafScriptTool implements McpTool {
             structured.addProperty("error", "Recaf script execution was cancelled");
             return McpTool.errorResult("Recaf script execution was cancelled", structured);
         }
-        if (execution.runtimeErrorType() != null) {
+        if (execution.runtimeFailure() != null) {
             structured.addProperty(
                     "error",
                     "Recaf script failed at runtime; partial workspace mutations may remain"
@@ -156,15 +170,16 @@ public final class RunRecafScriptTool implements McpTool {
                                              Workspace workspace,
                                              Request request) throws Exception {
         WorkspaceResource primary = workspace.getPrimaryResource();
-        JvmClassBundle bundle = primary.getJvmClassBundle();
-        ChangeTracker tracker = new ChangeTracker(bundle);
+        ChangeTracker tracker = new ChangeTracker(primary);
         primary.addResourceJvmClassListener(tracker);
+        primary.addResourceAndroidClassListener(tracker);
         CapturedExecution captured;
         RestorationOutcome restoration = new RestorationOutcome(false, false, null);
         try {
             captured = captureAndRun(scriptEngine, request);
         } finally {
             primary.removeResourceJvmClassListener(tracker);
+            primary.removeResourceAndroidClassListener(tracker);
             restoration = restoreWorkspace(workspaceManager, workspace);
         }
         return new ScriptExecution(
@@ -173,8 +188,7 @@ public final class RunRecafScriptTool implements McpTool {
                 captured.cancelled(),
                 captured.diagnostics(),
                 captured.diagnosticCount(),
-                captured.runtimeErrorType(),
-                captured.runtimeErrorMessage(),
+                captured.runtimeFailure(),
                 captured.stdout(),
                 captured.stdoutBytes(),
                 captured.stdoutTruncated(),
@@ -236,8 +250,7 @@ public final class RunRecafScriptTool implements McpTool {
                     core.cancelled(),
                     core.diagnostics(),
                     core.diagnosticCount(),
-                    core.runtimeErrorType(),
-                    core.runtimeErrorMessage(),
+                    core.runtimeFailure(),
                     stdout,
                     capture.totalBytes(),
                     capture.truncated(),
@@ -259,7 +272,6 @@ public final class RunRecafScriptTool implements McpTool {
                     false,
                     diagnostics.values(),
                     diagnostics.total(),
-                    null,
                     null
             );
         }
@@ -270,7 +282,6 @@ public final class RunRecafScriptTool implements McpTool {
                     false,
                     diagnostics.values(),
                     diagnostics.total(),
-                    null,
                     null
             );
         }
@@ -285,9 +296,53 @@ public final class RunRecafScriptTool implements McpTool {
                 result.wasCancelled(),
                 runDiagnostics.values(),
                 runDiagnostics.total(),
-                runtimeFailure == null ? null : runtimeFailure.getClass().getName(),
-                runtimeFailure == null ? null : exceptionMessage(runtimeFailure)
+                describeRuntimeFailure(runtimeFailure)
         );
+    }
+
+    static ScriptRuntimeFailure describeRuntimeFailure(Throwable throwable) {
+        if (throwable == null) return null;
+        List<ScriptRuntimeCause> causes = new ArrayList<>();
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = throwable;
+        while (current != null && causes.size() < MAX_RUNTIME_CAUSES && seen.add(current)) {
+            StackTraceElement[] stack = current.getStackTrace();
+            causes.add(new ScriptRuntimeCause(
+                    current.getClass().getName(),
+                    exceptionMessage(current),
+                    Arrays.stream(stack).limit(MAX_RUNTIME_STACK_FRAMES)
+                            .map(frame -> bounded(frame.toString(), MAX_STACK_FRAME_LENGTH))
+                            .toList(),
+                    stack.length > MAX_RUNTIME_STACK_FRAMES
+            ));
+            current = current.getCause();
+        }
+        return new ScriptRuntimeFailure(List.copyOf(causes), current != null);
+    }
+
+    private static void addRuntimeFailure(JsonObject structured, ScriptRuntimeFailure failure) {
+        if (failure == null) return;
+        ScriptRuntimeCause outer = failure.causes().getFirst();
+        structured.addProperty("runtime_error_type", outer.type());
+        structured.addProperty("runtime_error_message", outer.message());
+        JsonArray chain = new JsonArray();
+        for (ScriptRuntimeCause cause : failure.causes()) {
+            JsonObject item = new JsonObject();
+            item.addProperty("type", cause.type());
+            item.addProperty("message", cause.message());
+            JsonArray frames = new JsonArray();
+            cause.stackTrace().forEach(frames::add);
+            item.add("stack_trace", frames);
+            item.addProperty("stack_trace_truncated", cause.stackTraceTruncated());
+            chain.add(item);
+        }
+        structured.add("runtime_error_chain", chain);
+        structured.addProperty("runtime_error_chain_truncated", failure.truncated());
+        if (!failure.truncated()) {
+            ScriptRuntimeCause root = failure.causes().getLast();
+            structured.addProperty("runtime_root_cause_type", root.type());
+            structured.addProperty("runtime_root_cause_message", root.message());
+        }
     }
 
     private static <T> T await(CompletableFuture<T> future, Runnable cancellation)
@@ -381,10 +436,7 @@ public final class RunRecafScriptTool implements McpTool {
                     execution.scriptResultParseError()
             );
         }
-        if (execution.runtimeErrorType() != null) {
-            structured.addProperty("runtime_error_type", execution.runtimeErrorType());
-            structured.addProperty("runtime_error_message", execution.runtimeErrorMessage());
-        }
+        addRuntimeFailure(structured, execution.runtimeFailure());
 
         JsonArray diagnostics = new JsonArray();
         execution.diagnostics().stream().limit(MAX_DIAGNOSTICS).forEach(diagnostic -> {
@@ -421,7 +473,7 @@ public final class RunRecafScriptTool implements McpTool {
         addCategory(structured, "added", execution.addedClasses());
         addCategory(structured, "modified", execution.modifiedClasses());
         addCategory(structured, "removed", execution.removedClasses());
-        structured.addProperty("change_observation_scope", "primary_jvm_bundle_events");
+        structured.addProperty("change_observation_scope", "primary_jvm_and_android_bundle_events");
         structured.addProperty("workspace_changed", execution.workspaceChanged());
         structured.addProperty("workspace_restored", execution.workspaceRestored());
         if (execution.workspaceRestoreError() != null) {
@@ -506,7 +558,8 @@ public final class RunRecafScriptTool implements McpTool {
         script.addProperty("maxLength", MAX_SCRIPT_LENGTH);
         script.addProperty(
                 "description",
-                "Recaf Java shorthand or full class; read get_recaf_script_help."
+                "Recaf Java shorthand or full class; read get_recaf_script_help. "
+                        + "For APK/DEX use native DEX trees and bundle.put; see the workspace topic."
         );
         JsonObject compileOnly = new JsonObject();
         compileOnly.addProperty("type", "boolean");
@@ -611,8 +664,7 @@ public final class RunRecafScriptTool implements McpTool {
                            boolean cancelled,
                            List<ScriptDiagnostic> diagnostics,
                            int diagnosticCount,
-                           String runtimeErrorType,
-                           String runtimeErrorMessage,
+                           ScriptRuntimeFailure runtimeFailure,
                            String stdout,
                            long stdoutBytes,
                            boolean stdoutTruncated,
@@ -631,8 +683,7 @@ public final class RunRecafScriptTool implements McpTool {
                                  boolean cancelled,
                                  List<ScriptDiagnostic> diagnostics,
                                  int diagnosticCount,
-                                 String runtimeErrorType,
-                                 String runtimeErrorMessage) {
+                                 ScriptRuntimeFailure runtimeFailure) {
     }
 
     private record CapturedExecution(boolean compileSuccess,
@@ -640,8 +691,7 @@ public final class RunRecafScriptTool implements McpTool {
                                      boolean cancelled,
                                      List<ScriptDiagnostic> diagnostics,
                                      int diagnosticCount,
-                                     String runtimeErrorType,
-                                     String runtimeErrorMessage,
+                                     ScriptRuntimeFailure runtimeFailure,
                                      String stdout,
                                      long stdoutBytes,
                                      boolean stdoutTruncated,
@@ -652,38 +702,33 @@ public final class RunRecafScriptTool implements McpTool {
     private record ParsedScriptResult(JsonElement value, String error) {
     }
 
+    record ScriptRuntimeFailure(List<ScriptRuntimeCause> causes, boolean truncated) {
+    }
+
+    record ScriptRuntimeCause(String type, String message, List<String> stackTrace,
+                              boolean stackTraceTruncated) {
+    }
+
     private record DiagnosticSummary(List<ScriptDiagnostic> values, int total) {
     }
 
     private record RestorationOutcome(boolean changed, boolean restored, String error) {
     }
 
-    private static final class ChangeTracker implements ResourceJvmClassListener {
-        private final JvmClassBundle bundle;
-        private final Set<String> originalNames;
-        private final Set<String> added = Collections.synchronizedSet(new HashSet<>());
-        private final Set<String> modified = Collections.synchronizedSet(new HashSet<>());
-        private final Set<String> removed = Collections.synchronizedSet(new HashSet<>());
+    static final class ChangeTracker implements ResourceJvmClassListener, ResourceAndroidClassListener {
+        private final Map<ClassBundle<?>, BundleChanges> bundles = new IdentityHashMap<>();
 
-        private ChangeTracker(JvmClassBundle bundle) {
-            this.bundle = bundle;
-            originalNames = Set.copyOf(bundle.keySet());
+        ChangeTracker(WorkspaceResource primary) {
+            bundles.put(primary.getJvmClassBundle(), new BundleChanges(primary.getJvmClassBundle()));
+            primary.getAndroidClassBundles().values().forEach(bundle ->
+                    bundles.put(bundle, new BundleChanges(bundle)));
         }
 
         @Override
         public void onNewClass(WorkspaceResource resource,
                                JvmClassBundle currentBundle,
                                JvmClassInfo newValue) {
-            if (currentBundle != bundle) {
-                return;
-            }
-            String name = newValue.getName();
-            removed.remove(name);
-            if (originalNames.contains(name)) {
-                modified.add(name);
-            } else {
-                added.add(name);
-            }
+            recordNew(currentBundle, newValue.getName());
         }
 
         @Override
@@ -691,53 +736,92 @@ public final class RunRecafScriptTool implements McpTool {
                                   JvmClassBundle currentBundle,
                                   JvmClassInfo oldValue,
                                   JvmClassInfo newValue) {
-            if (currentBundle != bundle) {
-                return;
-            }
-            if (!oldValue.getName().equals(newValue.getName())) {
-                recordRemoval(oldValue.getName());
-                onNewClass(resource, currentBundle, newValue);
-            } else if (originalNames.contains(newValue.getName())) {
-                removed.remove(newValue.getName());
-                modified.add(newValue.getName());
-            } else {
-                added.add(newValue.getName());
-            }
+            recordUpdate(currentBundle, oldValue.getName(), newValue.getName());
         }
 
         @Override
         public void onRemoveClass(WorkspaceResource resource,
                                   JvmClassBundle currentBundle,
                                   JvmClassInfo removedValue) {
-            if (currentBundle == bundle) {
-                recordRemoval(removedValue.getName());
+            recordRemoval(currentBundle, removedValue.getName());
+        }
+
+        @Override
+        public void onNewClass(WorkspaceResource resource, AndroidClassBundle bundle, AndroidClassInfo value) {
+            recordNew(bundle, value.getName());
+        }
+
+        @Override
+        public void onUpdateClass(WorkspaceResource resource, AndroidClassBundle bundle,
+                                  AndroidClassInfo before, AndroidClassInfo after) {
+            recordUpdate(bundle, before.getName(), after.getName());
+        }
+
+        @Override
+        public void onRemoveClass(WorkspaceResource resource, AndroidClassBundle bundle, AndroidClassInfo value) {
+            recordRemoval(bundle, value.getName());
+        }
+
+        private void recordNew(ClassBundle<?> bundle, String name) {
+            BundleChanges changes = bundles.get(bundle);
+            if (changes != null) changes.recordNew(name);
+        }
+
+        private void recordUpdate(ClassBundle<?> bundle, String before, String after) {
+            BundleChanges changes = bundles.get(bundle);
+            if (changes == null) return;
+            if (!before.equals(after)) changes.recordRemoval(before);
+            changes.recordNew(after);
+        }
+
+        private void recordRemoval(ClassBundle<?> bundle, String name) {
+            BundleChanges changes = bundles.get(bundle);
+            if (changes != null) changes.recordRemoval(name);
+        }
+
+        List<String> added() {
+            return names(changes -> changes.added);
+        }
+
+        List<String> modified() {
+            return names(changes -> changes.modified);
+        }
+
+        List<String> removed() {
+            return names(changes -> changes.removed);
+        }
+
+        private List<String> names(java.util.function.Function<BundleChanges, Set<String>> category) {
+            Set<String> names = new HashSet<>();
+            bundles.values().forEach(changes -> {
+                Set<String> values = category.apply(changes);
+                synchronized (values) {
+                    names.addAll(values);
+                }
+            });
+            return names.stream().sorted().toList();
+        }
+
+        private static final class BundleChanges {
+            private final Set<String> originalNames;
+            private final Set<String> added = Collections.synchronizedSet(new HashSet<>());
+            private final Set<String> modified = Collections.synchronizedSet(new HashSet<>());
+            private final Set<String> removed = Collections.synchronizedSet(new HashSet<>());
+
+            private BundleChanges(ClassBundle<?> bundle) {
+                originalNames = Set.copyOf(bundle.keySet());
             }
-        }
 
-        private void recordRemoval(String name) {
-            modified.remove(name);
-            if (originalNames.contains(name)) {
-                removed.add(name);
-            } else {
-                added.remove(name);
+            private void recordNew(String name) {
+                removed.remove(name);
+                if (originalNames.contains(name)) modified.add(name);
+                else added.add(name);
             }
-        }
 
-        private List<String> added() {
-            return sortedCopy(added);
-        }
-
-        private List<String> modified() {
-            return sortedCopy(modified);
-        }
-
-        private List<String> removed() {
-            return sortedCopy(removed);
-        }
-
-        private static List<String> sortedCopy(Set<String> values) {
-            synchronized (values) {
-                return values.stream().sorted().toList();
+            private void recordRemoval(String name) {
+                modified.remove(name);
+                if (originalNames.contains(name)) removed.add(name);
+                else added.remove(name);
             }
         }
     }

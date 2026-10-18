@@ -205,7 +205,7 @@ public final class GetClassBytecodeTool implements McpTool {
         return McpTool.errorResult(message, structured);
     }
 
-    private static byte[] singleClassDex(AndroidClassInfo classInfo,
+    static byte[] singleClassDex(AndroidClassInfo classInfo,
                                          int dexVersion) throws IOException {
         DexFile file = new DexFile(
                 dexVersion,

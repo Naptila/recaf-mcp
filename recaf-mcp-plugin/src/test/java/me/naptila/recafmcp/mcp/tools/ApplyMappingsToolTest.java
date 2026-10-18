@@ -285,7 +285,9 @@ class ApplyMappingsToolTest {
     }
 
     private static Workspace workspace() {
-        WorkspaceResource primary = new WorkspaceResourceBuilder()
+        WorkspaceResource primary = new software.coley.recaf.workspace.model.resource.WorkspaceFileResourceBuilder()
+                .withFileInfo(new software.coley.recaf.info.builder.JarFileInfoBuilder()
+                        .withName("input.jar").withRawContent(new byte[]{1}).build())
                 .withJvmClassBundle(new BasicJvmClassBundle())
                 .build();
         return new BasicWorkspace(primary, List.of(), false);

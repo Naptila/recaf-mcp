@@ -1,9 +1,13 @@
 name: Build
 
 on:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -113,11 +117,17 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  real-worker:
+    name: Pinned Recaf Worker
+    uses: ./.github/workflows/real-worker.yml
+
   release:
     name: GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - plugin
       - bridge
+      - real-worker
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

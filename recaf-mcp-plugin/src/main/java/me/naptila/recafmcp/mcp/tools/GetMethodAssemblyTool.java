@@ -17,7 +17,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * Returns JVM Jasm or read-only DEX disassembly for one exact primary method.
+ * Returns editable JVM or Dalvik Jasm for one exact primary method.
  */
 public final class GetMethodAssemblyTool implements McpTool {
     private static final int MAX_OWNER_LENGTH = 1_000;
@@ -57,7 +57,7 @@ public final class GetMethodAssemblyTool implements McpTool {
 
     @Override
     public String description() {
-        return "Read JVM Jasm or read-only Android DEX instructions for one exact method.";
+        return "Read editable JVM or Dalvik Jasm for one exact method.";
     }
 
     @Override
@@ -187,7 +187,16 @@ public final class GetMethodAssemblyTool implements McpTool {
         }
         List<AndroidInstructionSupport.InstructionLine> instructions =
                 AndroidInstructionSupport.instructions(method);
-        String assembly = dexDisassembly(method, instructions);
+        String assembly;
+        String classHash;
+        try {
+            assembly = AndroidAssemblySupport.disassemble(entry.classInfo().asAndroidClass(), request.name(), request.descriptor());
+            int version = workspace.getPrimaryResource().getAndroidClassBundles().get(entry.dexName()).getVersion();
+            classHash = MethodAssemblySupport.sha256(AndroidAssemblySupport.bytes(entry.classInfo().asAndroidClass(), version));
+        } catch (Exception ex) {
+            ToolCancellation.propagateIfRequested(ex);
+            return error("Dalvik disassembly failed: " + MethodAssemblySupport.exceptionMessage(ex), request, List.of());
+        }
         if (assembly.length() > MethodAssemblySupport.MAX_ASSEMBLY_LENGTH) {
             return error(
                     "method DEX disassembly exceeds the response length limit",
@@ -206,14 +215,14 @@ public final class GetMethodAssemblyTool implements McpTool {
                 "assembly_sha256",
                 MethodAssemblySupport.sha256(assembly)
         );
-        structured.add("class_sha256", JsonNull.INSTANCE);
+        structured.addProperty("class_sha256", classHash);
         structured.addProperty("access", method.access());
         structured.add("classfile_version", JsonNull.INSTANCE);
         structured.addProperty("dex_version", dexVersion);
-        structured.addProperty("assembly_format", "android_dex_method_disassembly");
-        structured.addProperty("editable", false);
-        structured.addProperty("patch_supported", false);
-        structured.add("patch_tool", JsonNull.INSTANCE);
+        structured.addProperty("assembly_format", "recaf_jasm_dalvik_method");
+        structured.addProperty("editable", true);
+        structured.addProperty("patch_supported", true);
+        structured.addProperty("patch_tool", "patch_instructions");
         structured.addProperty("instruction_count", instructions.size());
         if (method.code() == null) {
             structured.add("registers", JsonNull.INSTANCE);
@@ -233,36 +242,6 @@ public final class GetMethodAssemblyTool implements McpTool {
             return McpTool.successResult("method assembly unchanged", structured);
         }
         return McpTool.successResult("read complete Android DEX method disassembly", structured);
-    }
-
-    private static String dexDisassembly(
-            AndroidInstructionSupport.MethodCode method,
-            List<AndroidInstructionSupport.InstructionLine> instructions) {
-        StringBuilder text = new StringBuilder();
-        text.append("# Read-only DEX method disassembly; patch_instructions is JVM-only\n")
-                .append(".method ")
-                .append(method.owner().className())
-                .append('.')
-                .append(method.name())
-                .append(method.descriptor())
-                .append('\n')
-                .append(".access ")
-                .append(method.access())
-                .append('\n');
-        if (method.code() == null) {
-            text.append("# no code (abstract or native)\n");
-        } else {
-            text.append(".registers ").append(method.code().getRegisters()).append('\n')
-                    .append(".ins ").append(method.code().getIn()).append('\n')
-                    .append(".outs ").append(method.code().getOut()).append('\n');
-            for (AndroidInstructionSupport.InstructionLine instruction : instructions) {
-                text.append(String.format("%06x", instruction.offset()))
-                        .append(": ")
-                        .append(instruction.text())
-                        .append('\n');
-            }
-        }
-        return text.append(".end method\n").toString();
     }
 
     private static JsonObject error(String message,
@@ -352,7 +331,7 @@ public final class GetMethodAssemblyTool implements McpTool {
         schema.addProperty("type", "object");
         schema.addProperty(
                 "description",
-                "JVM: editable Jasm; Android: read-only DEX text with no APK/DEX patching."
+                "Editable JVM or Dalvik Jasm; pass the same scope and dex_name when patching."
         );
         schema.add("properties", properties);
         schema.add("required", required);

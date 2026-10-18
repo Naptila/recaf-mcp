@@ -27,18 +27,18 @@ def _object_schema(
 LIFECYCLE_TOOLS = (
     types.Tool(
         name="recaf_open",
-        description="Open a JAR or APK in a new isolated headless Recaf session.",
+        description="Open a JAR, APK, or DEX in a new isolated headless Recaf session.",
         inputSchema=_object_schema(
             {
                 "input_path": {
                     "type": "string",
-                    "description": "Absolute path to the input JAR or APK.",
+                    "description": "Absolute path to the input JAR, APK, or DEX.",
                 },
                 "autosave_path": {
                     "type": "string",
                     "description": (
-                        "Optional absolute autosave destination for a savable "
-                        "JVM archive; unsupported for APK/DEX."
+                        "Optional absolute autosave destination in the input format. "
+                        "APK/DEX destinations require .apk/.dex; APK output is unsigned."
                     ),
                 },
                 "idle_ttl_sec": {
@@ -52,7 +52,7 @@ LIFECYCLE_TOOLS = (
     ),
     types.Tool(
         name="recaf_save",
-        description="Atomically save a JAR session; APK/DEX save is unsupported.",
+        description="Atomically save a JAR, APK, or DEX in its original format. APK output is unsigned.",
         inputSchema=_object_schema(
             {
                 "database": {"type": "string", "minLength": 1},
@@ -65,8 +65,8 @@ LIFECYCLE_TOOLS = (
     types.Tool(
         name="recaf_close",
         description=(
-            "Close a session; omitted save persists JVM archives and discards "
-            "APK/DEX sessions without exporting them."
+            "Close a session; omitted save persists supported JAR/APK/DEX inputs. "
+            "APK output is unsigned; use save=false to discard."
         ),
         inputSchema=_object_schema(
             {

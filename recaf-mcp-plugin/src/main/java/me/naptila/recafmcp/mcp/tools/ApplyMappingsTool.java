@@ -134,7 +134,6 @@ public final class ApplyMappingsTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
-        boolean hasAndroidClasses = MappingMutationSupport.hasAndroidClasses(workspace);
 
         MappingFileFormat format = formatResolver.apply(descriptor.name());
         if (format == null) {
@@ -227,13 +226,10 @@ public final class ApplyMappingsTool implements McpTool {
         MappingToolSupport.addCounts(structured, counts);
         addChanges(structured, request, prepared);
         structured.addProperty("applied", applied);
-        addPersistenceMetadata(structured, applied, hasAndroidClasses);
+        MappingMutationSupport.addPersistenceMetadata(structured, workspace, applied);
         String message = request.dryRun()
                 ? "mapping dry run prepared " + prepared.classChanges().size()
                 + " changed classes without applying them"
-                : hasAndroidClasses
-                ? "applied mappings to " + prepared.classChanges().size()
-                + " classes in memory; APK/DEX archive export remains unsupported"
                 : "applied mappings to " + prepared.classChanges().size()
                 + " classes; save the workspace to persist changes";
         return McpTool.successResult(message, structured);
@@ -573,20 +569,4 @@ public final class ApplyMappingsTool implements McpTool {
                 .count();
     }
 
-    private static void addPersistenceMetadata(JsonObject target,
-                                               boolean applied,
-                                               boolean hasAndroidClasses) {
-        boolean archiveExportSupported = !hasAndroidClasses;
-        target.addProperty("workspace_mutated_in_memory", applied);
-        target.addProperty("workspace_archive_export_supported", archiveExportSupported);
-        target.addProperty("save_required", applied && archiveExportSupported);
-        target.addProperty("in_memory_only", applied && hasAndroidClasses);
-        if (hasAndroidClasses) {
-            target.addProperty(
-                    "persistence_note",
-                    "DEX mappings affect this Recaf session only; export_mappings is "
-                            + "supported, but APK/DEX archive export is not"
-            );
-        }
-    }
 }

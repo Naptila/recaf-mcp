@@ -1,5 +1,7 @@
 package me.naptila.recafmcp.mcp.tools;
 
+import me.naptila.recafmcp.mcp.android.AndroidJvmConverter;
+
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
@@ -500,7 +502,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             CompletableFuture<DecompileResult> result;
             try {
                 JvmClassInfo classInfo = entry.scope() == ClassToolSupport.Scope.ANDROID
-                        ? entry.classInfo().asAndroidClass().asJvmClass()
+                        ? AndroidJvmConverter.convert(entry.classInfo().asAndroidClass())
                         : entry.classInfo().asJvmClass();
                 result = Objects.requireNonNull(
                         decompiler.operation().run(workspace, classInfo),

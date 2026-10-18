@@ -6,7 +6,7 @@ plugins {
 }
 
 group = 'me.naptila'
-version = '1.0.2'
+version = '1.1.0'
 
 ext {
     // The version of Recaf we're building against.
@@ -88,11 +88,21 @@ dependencies {
 
     testImplementation platform('org.junit:junit-bom:5.11.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
+    // Independent DEX encoder/parser: catches bugs hidden by same-library round trips.
+    testImplementation 'org.smali:dexlib2:2.5.2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 test {
     useJUnitPlatform()
+}
+
+tasks.register('generateAndroidFidelityFixture', JavaExec) {
+    dependsOn 'testClasses'
+    classpath sourceSets.test.runtimeClasspath
+    mainClass = 'me.naptila.recafmcp.AndroidFidelityFixture'
+    args(providers.gradleProperty('androidFixtureOutput')
+            .getOrElse(file("$buildDir/fixtures/android-fidelity").absolutePath))
 }
 
 // We include the JavaFX plugin to allow you to quickly run Recaf from this project.

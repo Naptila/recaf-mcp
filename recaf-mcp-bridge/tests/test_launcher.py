@@ -85,12 +85,15 @@ class ReadyProbe:
 
 def ready_health(input_path: Path, pid: int) -> dict[str, Any]:
     return {
+        "recaf_compatible": True,
+        "recaf_commit": "runtime-revision",
         "ok": True,
         "pid": pid,
         "ready": True,
         "workspace_open": True,
         "workspace_ready": True,
         "workspace_archive_export_supported": True,
+        "workspace_output_format": "jar",
         "expected_input_path": str(input_path.resolve()),
         "input_path": str(input_path.resolve()),
         "plugin_build": "1.0.0",
@@ -137,6 +140,55 @@ def make_launcher(
         sleep=no_sleep,
     )
     return launcher, manager, reservations
+
+
+def test_runtime_revision_must_match_catalog_discovery(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.jar"
+    input_path.write_bytes(b"jar")
+    launcher, _, _ = make_launcher(
+        tmp_path, input_path, ReadyProbe(input_path),
+        RecordingStarter(), RecordingTerminator(), [43101],
+    )
+    launcher._expected_identity = WorkerIdentity("1.0.0", FINGERPRINT, "runtime-revision")
+    health = ready_health(input_path, 1000)
+    launcher._validate_health_identity(health, input_path, 1000)
+    health["recaf_commit"] = "replacement-runtime"
+    with pytest.raises(WorkerLaunchError, match="changed since catalog discovery"):
+        launcher._validate_health_identity(health, input_path, 1000)
+    health["recaf_compatible"] = False
+    with pytest.raises(WorkerLaunchError, match="incompatible"):
+        launcher._validate_health_identity(health, input_path, 1000)
+
+
+@pytest.mark.parametrize("output_format", ["apk", "dex"])
+def test_detected_android_format_controls_autosave_for_misnamed_input(
+    tmp_path: Path, output_format: str,
+) -> None:
+    input_path = tmp_path / "input.bin"
+    input_path.write_bytes(b"fixture")
+
+    class AndroidProbe(ReadyProbe):
+        async def probe(self, port: int, token: str) -> dict[str, Any]:
+            health = await super().probe(port, token)
+            health["workspace_output_format"] = output_format
+            return health
+
+    launcher, _, reservations = make_launcher(
+        tmp_path, input_path, AndroidProbe(input_path),
+        RecordingStarter(), RecordingTerminator(), [43101],
+    )
+
+    async def scenario() -> None:
+        session = await launcher.launch(input_path)
+        try:
+            assert session.output_format == output_format
+            assert session.autosave_path.suffix == f".{output_format}"
+            assert await reservations.owns(session.sid, session.autosave_path)
+            assert not await reservations.owns(session.sid, session.autosave_path.with_suffix(".jar"))
+        finally:
+            await launcher.abort(session.sid)
+
+    anyio.run(scenario)
 
 
 def test_launch_uses_argument_vector_and_token_only_in_environment(
@@ -229,10 +281,10 @@ def test_port_collision_retries_with_fresh_process_port_and_token(
     anyio.run(scenario)
 
 
-def test_android_launch_disables_autosave_and_rejects_an_explicit_target(
+def test_unsupported_launch_disables_autosave_and_rejects_an_explicit_target(
     tmp_path: Path,
 ) -> None:
-    input_path = tmp_path / "input.apk"
+    input_path = tmp_path / "input.bin"
     input_path.write_bytes(b"apk")
     starter = RecordingStarter()
     terminator = RecordingTerminator()
@@ -271,7 +323,7 @@ def test_android_launch_disables_autosave_and_rejects_an_explicit_target(
             second_terminator,
             [43107],
         )
-        with pytest.raises(WorkerLaunchError, match="unsupported for APK/DEX"):
+        with pytest.raises(WorkerLaunchError, match="unsupported for this workspace"):
             await second.launch(input_path, tmp_path / "output.jar")
         assert await second_manager.slot_count() == 0
         assert second_terminator.processes == second_starter.processes

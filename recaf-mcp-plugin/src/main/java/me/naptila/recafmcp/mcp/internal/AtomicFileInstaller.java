@@ -38,6 +38,14 @@ public final class AtomicFileInstaller {
                                  Path destination,
                                  boolean overwrite,
                                  PathWriter writer) throws IOException {
+        return install(originalInput, destination, overwrite, writer, AtomicFileInstaller::validateZip);
+    }
+
+    public static Result install(Path originalInput,
+                                 Path destination,
+                                 boolean overwrite,
+                                 PathWriter writer,
+                                 PathValidator validator) throws IOException {
         Path input = originalInput.toRealPath();
         Path output = destination.toAbsolutePath().normalize();
         Path fileName = output.getFileName();
@@ -66,7 +74,7 @@ public final class AtomicFileInstaller {
         boolean installed = false;
         try {
             writer.write(temporary);
-            int entryCount = validateZip(temporary);
+            int entryCount = validator.validate(temporary);
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                 channel.force(true);
             }
@@ -112,6 +120,11 @@ public final class AtomicFileInstaller {
     @FunctionalInterface
     public interface PathWriter {
         void write(Path path) throws IOException;
+    }
+
+    @FunctionalInterface
+    public interface PathValidator {
+        int validate(Path path) throws IOException;
     }
 
     /**

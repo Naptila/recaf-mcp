@@ -18,7 +18,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * Assembles and atomically replaces one exact primary JVM method body.
+ * Assembles and atomically replaces one exact primary JVM or Dalvik method body.
  */
 public final class PatchInstructionsTool implements McpTool {
     private static final int SHA256_LENGTH = 64;
@@ -28,29 +28,39 @@ public final class PatchInstructionsTool implements McpTool {
             "descriptor",
             "assembly",
             "expected_assembly_sha256",
-            "dry_run"
+            "dry_run", "scope", "dex_name"
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
 
     private final BooleanSupplier hasWorkspace;
     private final Supplier<Workspace> workspaceSupplier;
     private final MethodAssemblySupport.MethodAssembler assembler;
+    private final AssemblerPipelineManager androidPipelineManager;
 
     public PatchInstructionsTool(WorkspaceManager workspaceManager,
                                  AssemblerPipelineManager pipelineManager) {
         this(
                 workspaceManager::hasCurrentWorkspace,
                 workspaceManager::getCurrent,
-                new MethodAssemblySupport.RecafMethodAssembler(pipelineManager)
+                new MethodAssemblySupport.RecafMethodAssembler(pipelineManager),
+                pipelineManager
         );
     }
 
     PatchInstructionsTool(BooleanSupplier hasWorkspace,
                           Supplier<Workspace> workspaceSupplier,
                           MethodAssemblySupport.MethodAssembler assembler) {
+        this(hasWorkspace, workspaceSupplier, assembler, null);
+    }
+
+    PatchInstructionsTool(BooleanSupplier hasWorkspace,
+                          Supplier<Workspace> workspaceSupplier,
+                          MethodAssemblySupport.MethodAssembler assembler,
+                          AssemblerPipelineManager androidPipelineManager) {
         this.hasWorkspace = Objects.requireNonNull(hasWorkspace, "hasWorkspace");
         this.workspaceSupplier = Objects.requireNonNull(workspaceSupplier, "workspaceSupplier");
         this.assembler = Objects.requireNonNull(assembler, "assembler");
+        this.androidPipelineManager = androidPipelineManager;
     }
 
     @Override
@@ -76,6 +86,9 @@ public final class PatchInstructionsTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        if (request.selection().scope() == ClassToolSupport.Scope.ANDROID) {
+            return executeAndroid(workspace, request);
+        }
         MethodAssemblySupport.Target target = MethodAssemblySupport.resolve(
                 workspace,
                 request.owner(),
@@ -211,6 +224,83 @@ public final class PatchInstructionsTool implements McpTool {
         return McpTool.successResult(message, structured);
     }
 
+    private JsonObject executeAndroid(Workspace workspace, Request request) {
+        List<MethodAssemblySupport.Diagnostic> diagnostics = new ArrayList<>();
+        String currentHash = null;
+        try {
+            ToolCancellation.check();
+            var matches = ClassToolSupport.exact(workspace.getPrimaryResource(),
+                    request.selection(), request.owner());
+            if (matches.size() != 1) {
+                JsonObject result = error(matches.isEmpty() ? "Android owner not found"
+                        : "Android owner is ambiguous; specify dex_name", request, diagnostics, null);
+                result.getAsJsonObject("structuredContent").add("candidates", ClassToolSupport.candidates(matches));
+                return result;
+            }
+            var entry = matches.getFirst();
+            var original = entry.classInfo().asAndroidClass();
+            if (original.getDeclaredMethod(request.name(), request.descriptor()) == null) {
+                return error("method not found in Android owner", request, diagnostics, null);
+            }
+            if (androidPipelineManager == null) {
+                return error("Dalvik assembler is unavailable", request, diagnostics, null);
+            }
+            var bundle = workspace.getPrimaryResource().getAndroidClassBundles().get(entry.dexName());
+            int version = bundle.getVersion();
+            String assembly = AndroidAssemblySupport.disassemble(original, request.name(), request.descriptor());
+            currentHash = MethodAssemblySupport.sha256(assembly);
+            if (!currentHash.equals(request.expectedAssemblySha256())) {
+                return error("method assembly changed; read it again with get_method_assembly",
+                        request, diagnostics, currentHash);
+            }
+            String originalHash = MethodAssemblySupport.sha256(AndroidAssemblySupport.bytes(original, version));
+            var result = AndroidAssemblySupport.assemble(androidPipelineManager, workspace, entry,
+                    request.name(), request.descriptor(), request.assembly());
+            diagnostics.addAll(result.diagnostics());
+            if (!result.success()) {
+                return error("Recaf rejected the submitted Dalvik assembly", request, diagnostics, currentHash);
+            }
+            var replacement = result.value();
+            String invalid = AndroidAssemblySupport.validateReplacement(original, replacement,
+                    request.name(), request.descriptor(), version);
+            if (invalid != null) {
+                return error(invalid, request, diagnostics, currentHash);
+            }
+            String patchedHash = MethodAssemblySupport.sha256(AndroidAssemblySupport.bytes(replacement, version));
+            boolean changed = !originalHash.equals(patchedHash);
+            ToolCancellation.check();
+            var latest = bundle.get(entry.className());
+            if (latest == null || !originalHash.equals(MethodAssemblySupport.sha256(
+                    AndroidAssemblySupport.bytes(latest, version)))) {
+                return error("owner class changed while preparing the patch; read get_method_assembly again",
+                        request, diagnostics, currentHash);
+            }
+            boolean applied = changed && !request.dryRun();
+            if (applied) {
+                bundle.put(replacement);
+            }
+            JsonObject structured = metadata(request);
+            ClassToolSupport.addIdentity(structured, entry);
+            structured.addProperty("scope", "primary_android");
+            structured.addProperty("assembly_format", "recaf_jasm_dalvik_method");
+            structured.addProperty("dex_version", version);
+            structured.addProperty("applied", applied);
+            structured.addProperty("changed", changed);
+            structured.addProperty("current_assembly_sha256", currentHash);
+            structured.addProperty("submitted_assembly_sha256", MethodAssemblySupport.sha256(request.assembly()));
+            structured.addProperty("original_class_sha256", originalHash);
+            structured.addProperty("patched_class_sha256", patchedHash);
+            MappingMutationSupport.addPersistenceMetadata(structured, workspace, applied);
+            MethodAssemblySupport.addDiagnostics(structured, diagnostics);
+            return McpTool.successResult(applied ? "assembled and replaced one Dalvik method"
+                    : "Dalvik method validated without workspace changes", structured);
+        } catch (Exception ex) {
+            ToolCancellation.propagateIfRequested(ex);
+            return error("Dalvik patch failed: " + MethodAssemblySupport.exceptionMessage(ex),
+                    request, diagnostics, currentHash);
+        }
+    }
+
     private static JsonObject error(
             String message,
             Request request,
@@ -233,6 +323,8 @@ public final class PatchInstructionsTool implements McpTool {
         structured.addProperty("descriptor", request.descriptor());
         structured.addProperty("expected_assembly_sha256", request.expectedAssemblySha256());
         structured.addProperty("dry_run", request.dryRun());
+        structured.addProperty("requested_scope", request.selection().scope().value());
+        structured.addProperty("dex_name", request.selection().dexName());
         return structured;
     }
 
@@ -264,7 +356,8 @@ public final class PatchInstructionsTool implements McpTool {
                     "expected_assembly_sha256 must be 64 lowercase hexadecimal characters"
             );
         }
-        return new Request(owner, name, descriptor, assembly, expectedHash, dryRun);
+        return new Request(owner, name, descriptor, assembly, expectedHash, dryRun,
+                ClassToolSupport.parseSelection(arguments, false));
     }
 
     private static boolean isLowercaseSha256(String value) {
@@ -283,13 +376,14 @@ public final class PatchInstructionsTool implements McpTool {
 
     private static JsonObject createInputSchema() {
         JsonObject properties = new JsonObject();
+        ClassToolSupport.addScopeProperties(properties, false);
         properties.add("owner", stringProperty(
                 1_000,
-                "Exact primary JVM internal owner name."
+                "Exact primary JVM or Android internal owner name."
         ));
         properties.add("name", stringProperty(
                 1_000,
-                "Exact JVM method name."
+                "Exact method name."
         ));
         properties.add("descriptor", stringProperty(
                 4_000,
@@ -348,6 +442,7 @@ public final class PatchInstructionsTool implements McpTool {
                    String descriptor,
                    String assembly,
                    String expectedAssemblySha256,
-                   boolean dryRun) {
+                   boolean dryRun,
+                   ClassToolSupport.Selection selection) {
     }
 }

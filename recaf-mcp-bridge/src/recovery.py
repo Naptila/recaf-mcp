@@ -14,7 +14,7 @@ from typing import Any
 
 import anyio
 
-from launcher import HealthProbe, HttpHealthProbe, WorkerIdentity
+from launcher import HealthProbe, HttpHealthProbe, WorkerIdentity, validate_recaf_runtime
 from sessions import (
     PathReservationError,
     PathReservations,
@@ -237,6 +237,7 @@ class RecoveryRegistry:
             raise RuntimeError("authenticated Worker build mismatch")
         if health.get("schema_fingerprint") != identity.schema_fingerprint:
             raise RuntimeError("authenticated Worker schema mismatch")
+        validate_recaf_runtime(health, identity.recaf_commit)
         if health.get("expected_input_path") != entry["input_path"]:
             raise RuntimeError("authenticated Worker expected-input mismatch")
         if health.get("input_path") != entry["input_path"]:
@@ -247,6 +248,7 @@ class RecoveryRegistry:
             or health.get("workspace_open") is not True
             or health.get("workspace_ready") is not True
             or health.get("workspace_archive_export_supported") is not True
+            or health.get("workspace_output_format") not in ("jar", "apk", "dex")
             or health.get("closing") is True
         ):
             raise RuntimeError("authenticated Worker is not recoverable")
@@ -265,6 +267,7 @@ class RecoveryRegistry:
             log_path=Path(entry["log_path"]),
             last_touched=time.monotonic(),
             idle_ttl_sec=entry["idle_ttl_sec"],
+            output_format=health.get("workspace_output_format"),
             save_error=(
                 str(save_error)[:1000]
                 if save_error is not None

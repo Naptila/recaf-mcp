@@ -105,12 +105,8 @@ final class TargetedMappingApplier {
                     .filter(candidates::contains)
                     .toList();
             if (!androidCandidates.isEmpty()) {
-                results.add(applier.applyToClasses(
-                        mappings,
-                        resource,
-                        bundle,
-                        androidCandidates
-                ));
+                results.add(AndroidMappingSupport.prepare(workspace, resource, bundle,
+                        androidCandidates, mappings, mappingListeners));
             }
         }
 
@@ -174,8 +170,12 @@ final class TargetedMappingApplier {
                 }
             }
         }
-        mappedClassNames.forEach(className ->
-                queries.add(new ReferenceQuery(exact(className))));
+        mappedClassNames.forEach(className -> {
+            queries.add(new ReferenceQuery(exact(className)));
+            // The one-argument query only visits type references. A method or
+            // field owner can be the caller's only reference to the mapped class.
+            queries.add(new ReferenceQuery(exact(className), null, null));
+        });
 
         for (List<FieldMapping> fields : intermediate.getFields().values()) {
             for (FieldMapping field : fields) {

@@ -219,10 +219,10 @@ class AndroidClassToolsTest {
         JsonObject assembly = assemblyTool.execute(assemblyArguments);
         assertFalse(assembly.get("isError").getAsBoolean(), assembly.toString());
         JsonObject assemblyStructured = assembly.getAsJsonObject("structuredContent");
-        assertEquals("android_dex_method_disassembly",
+        assertEquals("recaf_jasm_dalvik_method",
                 assemblyStructured.get("assembly_format").getAsString());
-        assertFalse(assemblyStructured.get("editable").getAsBoolean());
-        assertFalse(assemblyStructured.get("patch_supported").getAsBoolean());
+        assertTrue(assemblyStructured.get("editable").getAsBoolean());
+        assertTrue(assemblyStructured.get("patch_supported").getAsBoolean());
         assertTrue(assemblyStructured.get("assembly").getAsString()
                 .contains(STRING_VALUE));
         assemblyArguments.addProperty(
@@ -234,7 +234,7 @@ class AndroidClassToolsTest {
         assertTrue(unchangedAssembly.get("unchanged").getAsBoolean());
         assertFalse(unchangedAssembly.has("assembly"));
         assertEquals(
-                "android_dex_method_disassembly",
+                "recaf_jasm_dalvik_method",
                 unchangedAssembly.get("assembly_format").getAsString()
         );
 

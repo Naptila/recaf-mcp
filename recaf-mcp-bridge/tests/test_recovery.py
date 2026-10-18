@@ -79,12 +79,15 @@ def make_session(tmp_path: Path) -> Session:
 
 def matching_health(session: Session) -> dict[str, Any]:
     return {
+        "recaf_compatible": True,
+        "recaf_commit": "runtime-revision",
         "ok": True,
         "pid": session.process.pid,
         "ready": True,
         "workspace_open": True,
         "workspace_ready": True,
         "workspace_archive_export_supported": True,
+        "workspace_output_format": "jar",
         "busy": False,
         "closing": False,
         "expected_input_path": str(session.input_path),

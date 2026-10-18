@@ -171,7 +171,7 @@ public final class McpRequestHandler {
             case "workspace_info", "list_classes", "list_files", "get_class_bytecode",
                     "get_recaf_script_help" -> 15;
             case "decompile_class", "search_strings", "search_instructions",
-                    "search_members", "rename_symbol", "get_method_assembly",
+                    "search_members", "search_structure", "rename_symbol", "get_method_assembly",
                     "read_file", "export_mappings" -> 60;
             case "search_code", "call_graph", "patch_instructions" -> 120;
             case "transform_workspace", "patch_class", "run_recaf_script",

@@ -248,6 +248,7 @@ class McpRequestHandlerTest {
         assertFalse(response.getAsJsonObject("result").get("cancelled").getAsBoolean());
         assertEquals(15, McpRequestHandler.timeoutSeconds("workspace_info"));
         assertEquals(15, McpRequestHandler.timeoutSeconds("list_files"));
+        assertEquals(60, McpRequestHandler.timeoutSeconds("search_structure"));
         assertEquals(60, McpRequestHandler.timeoutSeconds("read_file"));
         assertEquals(60, McpRequestHandler.timeoutSeconds("search_instructions"));
         assertEquals(60, McpRequestHandler.timeoutSeconds("search_members"));

@@ -177,11 +177,8 @@ public final class RenameSymbolTool implements McpTool {
 
         JsonObject structuredContent = targetMetadata(request);
         MappingMutationSupport.addSummary(structuredContent, summary);
-        boolean hasAndroidClasses = MappingMutationSupport.hasAndroidClasses(workspace);
-        addPersistenceMetadata(structuredContent, hasAndroidClasses);
-        String suffix = hasAndroidClasses
-                ? " in memory; APK/DEX archive export remains unsupported"
-                : "";
+        MappingMutationSupport.addPersistenceMetadata(structuredContent, workspace, true);
+        String suffix = " in memory";
         return McpTool.successResult(
                 "renamed " + request.kind().jsonName + " "
                         + request.displayName() + suffix,
@@ -512,19 +509,4 @@ public final class RenameSymbolTool implements McpTool {
         }
     }
 
-    private static void addPersistenceMetadata(JsonObject target,
-                                               boolean hasAndroidClasses) {
-        boolean archiveExportSupported = !hasAndroidClasses;
-        target.addProperty("workspace_mutated_in_memory", true);
-        target.addProperty("workspace_archive_export_supported", archiveExportSupported);
-        target.addProperty("save_required", archiveExportSupported);
-        target.addProperty("in_memory_only", hasAndroidClasses);
-        if (hasAndroidClasses) {
-            target.addProperty(
-                    "persistence_note",
-                    "DEX renames affect this Recaf session only; export_mappings is "
-                            + "supported, but APK/DEX archive export is not"
-            );
-        }
-    }
 }

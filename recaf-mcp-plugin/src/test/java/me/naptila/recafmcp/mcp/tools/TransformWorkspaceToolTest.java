@@ -13,11 +13,32 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TransformWorkspaceToolTest {
+    private static software.coley.recaf.workspace.model.Workspace workspace() {
+        return new software.coley.recaf.workspace.model.BasicWorkspace(
+                new software.coley.recaf.workspace.model.resource.WorkspaceResourceBuilder().build(),
+                List.of(), false);
+    }
+
+    @Test
+    void rejectsPureAndroidWorkspaceBeforeRunningJvmTransformers() {
+        var workspace = new software.coley.recaf.workspace.model.BasicWorkspace(
+                new software.coley.recaf.workspace.model.resource.WorkspaceResourceBuilder()
+                        .withAndroidClassBundles(Map.of("classes.dex",
+                                new software.coley.recaf.workspace.model.bundle.BasicAndroidClassBundle(35, new byte[0])))
+                        .build(), List.of(), false);
+        var tool = new TransformWorkspaceTool(() -> true, () -> workspace, (current, request) -> {
+            throw new AssertionError("JVM transformer must not run on an Android-only workspace");
+        });
+        var result = tool.execute(new JsonObject());
+        assertTrue(result.get("isError").getAsBoolean());
+        assertTrue(result.getAsJsonObject("structuredContent").get("error").getAsString()
+                .contains("Android/DEX transformations are not supported"));
+    }
     @Test
     void appliesConservativeDefaultsAndReturnsPaginatedSummary() {
         TransformWorkspaceTool tool = new TransformWorkspaceTool(
                 () -> true,
-                () -> null,
+                TransformWorkspaceToolTest::workspace,
                 (workspace, request) -> {
                     assertEquals(List.of(
                             "duplicate_annotations",
@@ -51,7 +72,7 @@ class TransformWorkspaceToolTest {
     void preservesExplicitOrderAndDryRunState() {
         TransformWorkspaceTool tool = new TransformWorkspaceTool(
                 () -> true,
-                () -> null,
+                TransformWorkspaceToolTest::workspace,
                 (workspace, request) -> {
                     assertEquals(
                             List.of("frame_removal", "dead_code"),
@@ -81,7 +102,7 @@ class TransformWorkspaceToolTest {
     void transformerFailureIsAtomicToolError() {
         TransformWorkspaceTool tool = new TransformWorkspaceTool(
                 () -> true,
-                () -> null,
+                TransformWorkspaceToolTest::workspace,
                 (workspace, request) -> summary(
                         false,
                         List.of("sample/Broken"),

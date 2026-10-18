@@ -238,6 +238,7 @@ def test_open_list_and_workspace_info_end_to_end(tmp_path: Path) -> None:
                     "search_instructions",
                     "search_members",
                     "search_code",
+                    "search_structure",
                     "rename_symbol",
                     "apply_mappings",
                     "export_mappings",
@@ -285,6 +286,7 @@ def test_open_list_and_workspace_info_end_to_end(tmp_path: Path) -> None:
                     "search_instructions": 10,
                     "search_members": 10,
                     "search_code": 10,
+                    "search_structure": 10,
                     "export_mappings": 32 * 1024,
                     "call_graph": 10,
                     "get_class_bytecode": 32 * 1024,
@@ -760,6 +762,24 @@ def test_open_list_and_workspace_info_end_to_end(tmp_path: Path) -> None:
                     },
                 )
                 assert string_hits.isError is False
+                structure_schema = tools["search_structure"].inputSchema
+                assert structure_schema["required"] == ["database", "query"]
+                assert structure_schema["properties"]["scope"]["enum"] == ["jvm", "android", "all"]
+                assert structure_schema["properties"]["query"]["additionalProperties"] is False
+                structure = await client.call_tool("search_structure", {
+                    "database": database,
+                    "query": {"name": "me/naptila/recafmcp/RecafMCPPlugin", "methods": [
+                        {"name": "resolveExpectedInputPath", "descriptor": "()Ljava/nio/file/Path;",
+                         "opcodes": [176]},
+                    ]},
+                })
+                assert structure.isError is False, structure
+                assert structure.structuredContent["total"] == 1
+                assert structure.structuredContent["search_backend"] == "recaf_class_query"
+                invalid_structure = await client.call_tool("search_structure", {
+                    "database": database, "query": {"methods": [{"opcodes": [256]}]},
+                })
+                assert invalid_structure.isError is True
                 assert string_hits.structuredContent["total"] >= 1
                 assert string_hits.structuredContent["hits"][0]["class_name"] == (
                     "me/naptila/recafmcp/RecafMCPPlugin"
@@ -1547,10 +1567,10 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
                     {"input_path": str(input_path)},
                 )
                 assert opened.isError is False
-                assert opened.structuredContent["autosave_path"] is None
+                assert Path(opened.structuredContent["autosave_path"]).suffix == ".apk"
                 assert opened.structuredContent[
                     "workspace_archive_export_supported"
-                ] is False
+                ] is True
                 database = opened.structuredContent["database"]
 
                 apk_files = await client.call_tool(
@@ -1777,10 +1797,10 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
                 )
                 assert method_assembly.isError is False
                 assert method_assembly.structuredContent["assembly_format"] == (
-                    "android_dex_method_disassembly"
+                    "recaf_jasm_dalvik_method"
                 )
-                assert method_assembly.structuredContent["editable"] is False
-                assert method_assembly.structuredContent["patch_supported"] is False
+                assert method_assembly.structuredContent["editable"] is True
+                assert method_assembly.structuredContent["patch_supported"] is True
                 assert method_assembly.structuredContent["instruction_count"] > 0
 
                 graph = await client.call_tool(
@@ -1825,12 +1845,12 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
                 assert rename_metadata["android_changed_classes"] >= 1
                 assert rename_metadata["jvm_changed_classes"] == 0
                 assert rename_metadata["workspace_mutated_in_memory"] is True
-                assert rename_metadata["in_memory_only"] is True
+                assert rename_metadata["in_memory_only"] is False
                 assert (
                     rename_metadata["workspace_archive_export_supported"]
-                    is False
+                    is True
                 )
-                assert rename_metadata["save_required"] is False
+                assert rename_metadata["save_required"] is True
 
                 renamed_assembly = await client.call_tool(
                     "get_method_assembly",
@@ -1890,11 +1910,11 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
                 assert mapping_metadata["selected_scope_changed_classes"] >= 1
                 assert mapping_metadata["android_changed_classes"] >= 1
                 assert mapping_metadata["workspace_mutated_in_memory"] is True
-                assert mapping_metadata["in_memory_only"] is True
-                assert mapping_metadata["save_required"] is False
+                assert mapping_metadata["in_memory_only"] is False
+                assert mapping_metadata["save_required"] is True
                 assert (
                     mapping_metadata["workspace_archive_export_supported"]
-                    is False
+                    is True
                 )
                 assert any(
                     change["old_name"] == old_class
@@ -1968,7 +1988,7 @@ def test_android_analysis_and_mapping_tools_against_reference_apk(
                     {"database": database},
                 )
                 assert closed.isError is False
-                assert closed.structuredContent["saved"] is False
+                assert closed.structuredContent["saved"] is True
         finally:
             await service.close()
 

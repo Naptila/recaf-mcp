@@ -262,6 +262,7 @@ class BridgeToolService:
                 if session.autosave_path is not None
                 else None
             ),
+            "output_format": session.output_format,
             "workspace_archive_export_supported": (
                 session.autosave_path is not None
             ),
@@ -359,7 +360,7 @@ class BridgeToolService:
             save or arguments.get("output_path") is not None
         ):
             return _error_result(
-                "APK/DEX workspace archive export is unsupported",
+                "workspace format does not support saving",
                 "save_unsupported",
             )
         if not save and arguments.get("output_path") is not None:
@@ -412,7 +413,7 @@ class BridgeToolService:
             return _error_result("unknown Recaf session", "unknown_database")
         if session.autosave_path is None:
             return _error_result(
-                "APK/DEX workspace archive export is unsupported",
+                "workspace format does not support saving",
                 "save_unsupported",
             )
         if not self._session_ready(session):
@@ -492,8 +493,7 @@ class BridgeToolService:
             "database": database,
             "closed": True,
             "saved": True,
-            "path": saved["path"],
-            "size_bytes": saved["size_bytes"],
+            **{key: value for key, value in saved.items() if key != "ok"},
             "graceful": graceful,
         }
         if warning is not None:
@@ -517,7 +517,7 @@ class BridgeToolService:
     ) -> dict[str, Any]:
         if session.autosave_path is None:
             raise SaveWorkspaceError(
-                "APK/DEX workspace archive export is unsupported"
+                "workspace format does not support saving"
             )
         requested = session.autosave_path if output_path is None else output_path
         destination: Path | None = None
@@ -577,7 +577,17 @@ class BridgeToolService:
         actual_size = canonical_result.stat().st_size
         if size_bytes <= 0 or actual_size != size_bytes:
             raise SaveWorkspaceError("Worker save output size is invalid")
-        return {"ok": True, "path": str(canonical_result), "size_bytes": size_bytes}
+        metadata = {"ok": True, "path": str(canonical_result), "size_bytes": size_bytes}
+        output_format = result.get("format")
+        if output_format is not None:
+            if output_format not in ("jar", "apk", "dex"):
+                raise SaveWorkspaceError("Worker save result has invalid format")
+            signature = result.get("apk_signature_status")
+            expected_signature = "unsigned" if output_format == "apk" else "not_applicable"
+            if signature != expected_signature:
+                raise SaveWorkspaceError("Worker save result has invalid APK signature status")
+            metadata.update(format=output_format, apk_signature_status=signature)
+        return metadata
 
     @staticmethod
     def _save_result(
@@ -740,6 +750,7 @@ class BridgeToolService:
                 if session.autosave_path is not None
                 else None
             ),
+            "output_format": session.output_format,
             "workspace_archive_export_supported": (
                 session.autosave_path is not None
             ),

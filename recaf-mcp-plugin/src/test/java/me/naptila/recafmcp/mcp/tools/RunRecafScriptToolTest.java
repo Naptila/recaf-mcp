@@ -4,6 +4,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.InvocationTargetException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -32,6 +34,8 @@ class RunRecafScriptToolTest {
         assertFalse(result.get("isError").getAsBoolean());
         assertTrue(structured.get("compiled").getAsBoolean());
         assertFalse(structured.get("executed").getAsBoolean());
+        assertFalse(structured.get("workspace_changed").getAsBoolean());
+        assertFalse(structured.has("runtime_error_chain"));
         assertEquals("shorthand", structured.get("script_form").getAsString());
         assertEquals(64, structured.get("script_sha256").getAsString().length());
     }
@@ -87,6 +91,9 @@ class RunRecafScriptToolTest {
         assertEquals(3, structured.get("next_offset").getAsInt());
         assertFalse(structured.get("atomic").getAsBoolean());
         assertTrue(structured.get("save_required").getAsBoolean());
+        assertEquals("primary_jvm_and_android_bundle_events",
+                structured.get("change_observation_scope").getAsString());
+        assertFalse(structured.get("workspace_changed").getAsBoolean());
     }
 
     @Test
@@ -100,7 +107,6 @@ class RunRecafScriptToolTest {
                                 2, 4, 1, "error", "cannot find symbol"
                         )),
                         101,
-                        null,
                         null,
                         "",
                         0,
@@ -138,6 +144,69 @@ class RunRecafScriptToolTest {
         assertEquals("java.lang.IllegalStateException",
                 runtimeStructured.get("runtime_error_type").getAsString());
         assertEquals(1, runtimeStructured.get("modified_class_count").getAsInt());
+        assertEquals("bad target", runtimeStructured.get("runtime_root_cause_message").getAsString());
+        assertFalse(runtimeStructured.get("runtime_error_chain_truncated").getAsBoolean());
+    }
+
+    @Test
+    void reportsWrappedRuntimeRootCauseAndBoundedScriptFrames() {
+        IllegalArgumentException root = new IllegalArgumentException("invalid DEX operand\n" + "x".repeat(2_000));
+        StackTraceElement[] frames = new StackTraceElement[20];
+        Arrays.fill(frames, new StackTraceElement("MyScript", "run", "MyScript.java", 42));
+        root.setStackTrace(frames);
+        Throwable wrapper = new IllegalStateException("script wrapper", new InvocationTargetException(root));
+        RunRecafScriptTool tool = tool((workspace, request) -> execution(
+                true, true, wrapper, "", List.of(), List.of("sample/Partial"), List.of()
+        ));
+
+        JsonObject result = tool.execute(runtimeArguments());
+        JsonObject structured = result.getAsJsonObject("structuredContent");
+
+        assertTrue(result.get("isError").getAsBoolean());
+        assertEquals("java.lang.IllegalStateException", structured.get("runtime_error_type").getAsString());
+        assertEquals("script wrapper", structured.get("runtime_error_message").getAsString());
+        assertEquals("java.lang.IllegalArgumentException", structured.get("runtime_root_cause_type").getAsString());
+        String message = structured.get("runtime_root_cause_message").getAsString();
+        assertTrue(message.startsWith("invalid DEX operand "));
+        assertEquals(1_000, message.length());
+        assertEquals(3, structured.getAsJsonArray("runtime_error_chain").size());
+        JsonObject cause = structured.getAsJsonArray("runtime_error_chain").get(2).getAsJsonObject();
+        assertEquals(12, cause.getAsJsonArray("stack_trace").size());
+        assertEquals("MyScript.run(MyScript.java:42)", cause.getAsJsonArray("stack_trace").get(0).getAsString());
+        assertTrue(cause.get("stack_trace_truncated").getAsBoolean());
+        assertEquals(1, structured.get("modified_class_count").getAsInt());
+    }
+
+    @Test
+    void boundsDeepAndCyclicCauseChainsWithoutClaimingAnUnobservedRoot() {
+        Throwable deep = new IllegalArgumentException("root beyond limit");
+        for (int i = 0; i < 12; i++) deep = new IllegalStateException("wrapper " + i, deep);
+        Throwable cycle = new IllegalStateException("first");
+        Throwable other = new IllegalArgumentException("second", cycle);
+        cycle.initCause(other);
+        for (Throwable failure : List.of(deep, cycle)) {
+            RunRecafScriptTool tool = tool((workspace, request) -> execution(
+                    true, true, failure, "", List.of(), List.of(), List.of()
+            ));
+            JsonObject structured = tool.execute(runtimeArguments()).getAsJsonObject("structuredContent");
+            assertTrue(structured.get("runtime_error_chain_truncated").getAsBoolean());
+            assertEquals(failure == deep ? 8 : 2, structured.getAsJsonArray("runtime_error_chain").size());
+            assertFalse(structured.has("runtime_root_cause_type"));
+            assertFalse(structured.has("runtime_root_cause_message"));
+        }
+    }
+
+    @Test
+    void includesRootCauseWhenTheScriptOperationItselfFails() {
+        RunRecafScriptTool tool = tool((workspace, request) -> {
+            throw new IllegalStateException("operation wrapper", new IllegalArgumentException("bad instruction"));
+        });
+        JsonObject result = tool.execute(runtimeArguments());
+        JsonObject structured = result.getAsJsonObject("structuredContent");
+
+        assertTrue(result.get("isError").getAsBoolean());
+        assertEquals("java.lang.IllegalStateException", structured.get("runtime_error_type").getAsString());
+        assertEquals("bad instruction", structured.get("runtime_root_cause_message").getAsString());
     }
 
     @Test
@@ -188,8 +257,7 @@ class RunRecafScriptToolTest {
                 false,
                 List.of(),
                 0,
-                runtimeFailure == null ? null : runtimeFailure.getClass().getName(),
-                runtimeFailure == null ? null : runtimeFailure.getMessage(),
+                RunRecafScriptTool.describeRuntimeFailure(runtimeFailure),
                 stdout,
                 stdout.getBytes(java.nio.charset.StandardCharsets.UTF_8).length,
                 false,

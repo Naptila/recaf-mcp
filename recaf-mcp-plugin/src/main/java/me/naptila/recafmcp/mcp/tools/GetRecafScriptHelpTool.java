@@ -5,7 +5,7 @@ import com.google.gson.JsonObject;
 import me.naptila.recafmcp.RecafMCPPlugin;
 import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
-import software.coley.recaf.RecafBuildConfig;
+import me.naptila.recafmcp.mcp.RecafRuntimeInfo;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -57,8 +57,7 @@ public final class GetRecafScriptHelpTool implements McpTool {
         JsonArray available = new JsonArray();
         TOPICS.keySet().forEach(available::add);
         structured.add("available_topics", available);
-        structured.addProperty("recaf_version", RecafBuildConfig.VERSION);
-        structured.addProperty("recaf_commit", RecafBuildConfig.GIT_SHA);
+        RecafRuntimeInfo.current().addTo(structured);
         structured.addProperty("plugin_version", RecafMCPPlugin.PLUGIN_VERSION);
         structured.addProperty("source", "bundled_from_repository_recaf_docs");
         structured.addProperty("high_privilege", true);

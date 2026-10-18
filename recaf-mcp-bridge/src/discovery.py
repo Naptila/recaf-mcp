@@ -26,11 +26,13 @@ from launcher import (
     ProcessTerminator,
     WorkerIdentity,
     WorkerLaunchError,
+    WorkerLauncher,
     WorkerNotListening,
     WorkerPortCollision,
     allocate_loopback_port,
     start_worker_process,
     terminate_process_group,
+    validate_recaf_runtime,
 )
 from schema import INTERNAL_METHOD_NAMES
 from worker import WorkerRpcClient, WorkerRpcError
@@ -116,6 +118,10 @@ class SchemaWorkerDiscovery:
                     raise WorkerLaunchError(
                         "failed to start schema-only Worker"
                     ) from error
+                except WorkerLaunchError as error:
+                    raise WorkerLauncher._diagnostic_error(
+                        str(error), log_path, token,
+                    ) from error
                 finally:
                     if process is not None:
                         await self._process_terminator(process)
@@ -168,6 +174,7 @@ class SchemaWorkerDiscovery:
                 raise WorkerLaunchError("schema-only Worker expected an input")
             if health.get("input_path") is not None:
                 raise WorkerLaunchError("schema-only Worker opened an input")
+            validate_recaf_runtime(health)
             if health.get("last_error") is not None:
                 raise WorkerLaunchError("schema-only Worker reported a startup error")
             if (
@@ -185,6 +192,7 @@ class SchemaWorkerDiscovery:
         health: dict[str, Any],
         result: Any,
     ) -> DiscoveredWorkerCatalog:
+        recaf_commit = validate_recaf_runtime(health)
         if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
             raise WorkerLaunchError("Worker tools/list result is invalid")
         raw_tools = result["tools"]
@@ -215,6 +223,6 @@ class SchemaWorkerDiscovery:
                 raise WorkerLaunchError("Worker base schema contains database")
             tools.append(tool)
         return DiscoveredWorkerCatalog(
-            WorkerIdentity(plugin_build, fingerprint),
+            WorkerIdentity(plugin_build, fingerprint, recaf_commit),
             tuple(tools),
         )

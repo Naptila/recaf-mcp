@@ -51,6 +51,7 @@ class Session:
     retry_after: float = 0.0
     closing: bool = False
     state: Literal["starting", "ready", "closing", "dead"] = "starting"
+    output_format: str | None = "jar"
 
 
 class SessionManager:
@@ -291,6 +292,22 @@ class PathReservations:
             self._managed_targets.pop(sid)
             if self._targets.get(canonical) == sid:
                 del self._targets[canonical]
+
+    async def set_autosave_format(self, sid: str, output_format: str) -> Path:
+        """Adjust a pending default destination using the Worker's detected format."""
+        if output_format not in {"jar", "apk", "dex"}:
+            raise PathReservationError("unsupported output format")
+        async with self._lock:
+            input_path = self._inputs[sid]
+        destination = await self.reserve_output(
+            sid, input_path.with_name(f"{input_path.stem}.recaf-autosave-{sid}.{output_format}"),
+        )
+        async with self._lock:
+            previous = self._managed_targets[sid]
+            self._managed_targets[sid] = destination
+            if previous != destination and self._targets.get(previous) == sid:
+                del self._targets[previous]
+        return destination
 
     async def release_output(self, sid: str, output_path: Path) -> None:
         """Release a temporary output while retaining the managed autosave."""

@@ -58,6 +58,19 @@ final class MappingMutationSupport {
                 .anyMatch(bundle -> !bundle.isEmpty());
     }
 
+    static void addPersistenceMetadata(JsonObject target, Workspace workspace, boolean applied) {
+        boolean supported = me.naptila.recafmcp.mcp.internal.RecafSaveWorkspaceHandler
+                .supportsArchiveExport(workspace);
+        target.addProperty("workspace_mutated_in_memory", applied);
+        target.addProperty("workspace_archive_export_supported", supported);
+        target.addProperty("save_required", applied && supported);
+        target.addProperty("in_memory_only", applied && !supported);
+        if (!supported) {
+            target.addProperty("persistence_note", "This workspace is not a supported file-backed input; "
+                    + "export_mappings can preserve its symbol mappings.");
+        }
+    }
+
     static void addSummary(JsonObject target, Summary summary) {
         target.addProperty("changed_classes", summary.changes().size());
         target.addProperty("jvm_changed_classes", summary.jvmChanges());

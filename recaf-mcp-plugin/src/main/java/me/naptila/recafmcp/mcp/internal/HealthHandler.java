@@ -40,12 +40,12 @@ public final class HealthHandler {
                 health.isWorkspaceArchiveExportSupported()
         );
         result.addProperty("busy", operationCoordinator.isBusy());
+        addNullableString(result, "workspace_output_format", health.getWorkspaceOutputFormat());
         result.addProperty("closing", closing);
         addNullableString(result, "expected_input_path", health.getExpectedInputPath());
         addNullableString(result, "input_path", health.getActualInputPath());
         result.addProperty("plugin_build", health.getPluginBuild());
-        result.addProperty("recaf_version", health.getRecafVersion());
-        result.addProperty("recaf_commit", health.getRecafCommit());
+        health.getRecafRuntime().addTo(result);
         result.addProperty("schema_fingerprint", toolRegistry.schemaFingerprint());
         addNullableString(result, "last_error", health.getLastError());
         return result;

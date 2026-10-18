@@ -18,7 +18,7 @@ Python 3.11 or newer and `uv` are required. Install the cross-platform wheel
 directly from GitHub without a checkout or local build:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.0.2/recaf_mcp_bridge-1.0.2-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf_mcp_bridge-1.1.0-py3-none-any.whl
 ```
 
 To install from a local source checkout instead:
@@ -83,8 +83,8 @@ Recaf's `RECAF` base-directory override and the platform defaults under
 `%APPDATA%`, `~/Library/Application Support`, or `$XDG_CONFIG_HOME`/`~/.config`.
 Each launch copies only that plugin into a private session directory. Inputs
 and provisional autosaves are canonicalized and reserved before process
-creation; the autosave reservation is released once Recaf identifies an
-APK/DEX workspace. Pending launches count toward the session cap.
+creation; the default autosave extension is adjusted to the format detected
+by Recaf (`.jar`, `.apk`, or `.dex`). Pending launches count toward the session cap.
 
 The launcher does not use a shell. It gives every attempt a new loopback port,
 random bearer token, isolated Recaf data directory, plugin directory, log, and
@@ -99,26 +99,25 @@ The lifecycle and routed analysis flow is connected end to end:
 
 - `recaf_open(input_path, autosave_path?, idle_ttl_sec?)` returns an opaque
   `database` session ID only after authenticated workspace readiness. It also
-  reports `workspace_archive_export_supported`; APK/DEX sessions return
-  `autosave_path=null` and reject an explicit autosave path.
+  reports `workspace_archive_export_supported` and `output_format`; APK/DEX
+  sessions have `.apk`/`.dex` autosaves. Explicit Android paths need that extension.
 - `recaf_list()` returns public session state, canonical paths, port, idle
   status, busy state, and save errors. It never returns a token.
 - `set_idle_ttl(database, idle_ttl_sec)` updates the timeout from 0 (disabled)
   through 604800 seconds, touches the session, and resets a pending watchdog
   retry schedule.
 - `recaf_save(database, output_path?, overwrite=false)` serializes with routed
-  operations and atomically exports a supported JVM primary resource. The
+  operations and atomically exports a supported JAR/APK/DEX primary resource. The
   managed autosave can be replaced by its owner; a user-selected existing
-  target requires `overwrite=true`. APK/DEX save is rejected before any file
-  is written.
+  target requires `overwrite=true`. Results include `format` and
+  `apk_signature_status` (`unsigned` for APK, `not_applicable` otherwise).
 - Worker-owned `workspace_info(database)`, `list_classes(database, ...)`,
   `list_files(database, ...)`, `read_file(database, ...)`, and
   `decompile_class(database, ...)`, plus bulk source export, search, rename,
   and mapping tools, route through a generic allowlist proxy to the selected
   ready session.
 - `recaf_close(database, save?, output_path?)` uses a format-aware default:
-  JAR sessions save before shutdown, while APK/DEX sessions close without an
-  archive export. Explicit `save=true` is rejected for APK/DEX. If a JAR save
+  JAR/APK/DEX sessions save before shutdown. APK output is unsigned. If a save
   fails or is interrupted, the session returns to `ready` with `save_error`
   exposed by `recaf_list`, so the caller can retry.
 - `recaf_close(database, save=false)` is the explicit discard path. It drains
@@ -144,7 +143,7 @@ Workers are marked unhealthy.
 
 Workers enforce timeouts by expected tool cost: 15 seconds for workspace/class
 metadata, bytecode pages, and script help; 60 seconds for decompilation,
-string/instruction or member search, renames, and mapping export; 120 seconds for
+string/instruction, member or structural search, renames, and mapping export; 120 seconds for
 decompiled-code search and call graphs; and 300 seconds for mapping application,
 transforms, source patches, and Recaf script execution. Whole-archive
 `export_sources` receives 1,800 seconds. The Bridge's normal Worker
@@ -175,9 +174,8 @@ new routed operations, acquires its operation lock, then re-checks liveness,
 busy state, activity time, TTL, and retry deadline. A request that starts or
 finishes during that race therefore prevents expiration.
 
-An expired JAR session is atomically saved to its managed autosave before
-Worker shutdown and process-group cleanup. APK/DEX sessions skip archive export
-and proceed directly to shutdown. A JAR save failure keeps a responsive Worker
+An expired JAR/APK/DEX session is atomically saved to its managed autosave before
+Worker shutdown and process-group cleanup. A save failure keeps a responsive Worker
 alive, restores the session to `ready`, and leaves the bounded diagnostic in
 `recaf_list.save_error`. Retries use delays of 5, 10, 20, and so on up to a
 300-second maximum. A successful explicit save or `set_idle_ttl` clears the
@@ -186,10 +184,21 @@ session.
 
 ## Graceful shutdown and recovery
 
+An Android save request such as
+`recaf_save(database="abc123", output_path="/tmp/edited.apk")` returns
+structured metadata of this form:
+
+```json
+{"database":"abc123","ok":true,"path":"/tmp/edited.apk","size_bytes":4096,"format":"apk","apk_signature_status":"unsigned"}
+```
+
+The size is the actual installed file size. Raw DEX returns `format="dex"`
+and `apk_signature_status="not_applicable"`. These fields are also included
+when `recaf_close` saves. Original inputs are never overwritten.
+
 Client EOF, SIGINT, and SIGTERM stop new tool calls, cancel idle coordination,
 and give each live session up to 30 seconds to drain. The Bridge atomically
-saves JAR sessions before requesting Worker shutdown and closes APK/DEX
-sessions without export. A successful signal-driven shutdown exits with status
+saves JAR/APK/DEX sessions before requesting Worker shutdown. A successful signal-driven shutdown exits with status
 0 even when the client's stdin pipe remains open.
 
 If a save fails, the Bridge deliberately leaves that Worker alive and exits
@@ -307,7 +316,7 @@ Values longer than 4096 characters are explicitly truncated.
 dex_name?, offset=0, limit=10)` searches instructions without decompiling
 classes. JVM scope uses Recaf's `InstructionQuery`; Android scope walks the
 native DEX instruction tree. Hits include class/DEX identity, method name and
-descriptor, instruction index, formatted instruction, and a DEX byte offset
+descriptor, instruction index, formatted instruction, and a DEX code-unit offset
 for Android hits. For example, queries can match an invoke opcode, field
 operation, referenced internal class name, descriptor, or constant value. The
 optional class/package `filter` is applied before instruction traversal. This
@@ -400,12 +409,11 @@ source-producing `AndroidDecompiler`, so reusing its JVM conversion plus the
 discoverable JVM decompiler enum is intentional and reported as
 `recaf_android_to_jvm`.
 
-Android bytecode analysis operates directly on Recaf's DEX tree. Transform,
-patch, save, and APK/DEX archive rebuilding remain unsupported, but the three
-mapping tools support in-memory DEX symbol renames and mapping-text export.
-Bulk decompilation can export derived Android Java source without changing
-that archive boundary. Omit `save` when closing an APK session; the Bridge
-closes it without creating or exporting a JAR.
+Android bytecode analysis operates directly on Recaf's DEX tree. Source patching
+and JVM transformations remain unsupported for Android. Symbol renames and mappings
+can be saved to APK/DEX. APK export rebuilds all DEX bundles, preserves archive
+resources, removes obsolete signatures and aligns ZIP entries. The output is unsigned
+and must be signed separately for installation. Default close saves the workspace.
 
 `rename_symbol(database, kind, name, new_name, owner?, descriptor?,
 scope="jvm", dex_name?)` renames one exact primary-resource JVM or Android
@@ -435,8 +443,8 @@ changed-class pages at 500, and the result includes mapping counts and a
 SHA-256 digest. `scope` accepts `jvm`, `android`, or `all` and requires at least
 one change in that domain; it is not an isolation boundary because Recaf may
 also update cross-domain referrers. JAR changes remain in memory until an
-explicit save. APK/DEX mappings are session-only, so export their mapping text
-and close without saving.
+explicit save or automatic close. APK/DEX mappings persist through original-format
+save; exporting mapping text remains independent of workspace saving.
 
 `export_mappings(database, format, offset=0, limit=32768, if_sha256?)` formats
 the current session's Recaf aggregate mapping history as original-to-current text.
@@ -473,17 +481,100 @@ expand those vertices. This avoids reverse fan-out through common library
 calls; set it to `false` only when that broader traversal is wanted.
 `external_vertices_stopped` reports the number of unique boundary vertices.
 
-`transform_workspace(database, transformers?, class_prefix?, max_passes=1,
-dry_run=false, offset=0, limit=100)` runs only reviewed Recaf JVM transformer
+`search_structure(database, query, scope="jvm", dex_name?, offset=0, limit=10)`
+returns classes satisfying a native Recaf structural query. The `query` object
+accepts `name`, `regex`, `access_required`, `access_forbidden`, `fields`, and
+`methods`. Member objects accept the same name/access constraints and an exact
+`descriptor`; method objects also accept `opcodes`. Names are exact by default,
+and nested `regex=true` enables partial Java regex. Constraints are ANDed.
+Member and opcode arrays are unordered requirements with distinct assignments,
+so repeated opcodes require separate instructions. An empty list requires no
+members/instructions; omitted lists impose no constraint. Opcode integers are
+native to the selected VM, for example DEX `[26,14]` versus JVM `[18,177]` for
+string-load/return patterns. Access masks range from 0 to 65535 and required
+and forbidden bits cannot overlap. Queries allow eight fields, eight methods,
+and 32 opcodes per method. Results use stable class/domain/DEX ordering,
+preserve `class_scope`/`dex_name`, and return up to 200 hits per page with a
+20,000-hit collection cap reported by `collection_truncated`.
+
+Example request for a multi-DEX APK:
+
+```json
+{"database":"<id>","scope":"android","dex_name":"classes.dex",
+ "query":{"methods":[{"name":"greet","descriptor":"()V","opcodes":[26,14]}]}}
+```
+
+Example structured response excerpt:
+
+```json
+{"search_backend":"recaf_class_query","total":1,"returned":1,"next_offset":null,
+ "hits":[{"class_name":"sample/Greeter","class_scope":"android","dex_name":"classes.dex"}]}
+```
+
+`transform_workspace(database, transformers?, options?, phases?, class_prefix?,
+max_passes=1, dry_run=false, offset=0, limit=100)` runs only reviewed Recaf JVM transformer
 aliases. Omitting `transformers` selects the conservative
 `duplicate_annotations`, `illegal_annotations`, `illegal_signatures`, and
 `illegal_varargs` metadata cleanup set. Optional allowlisted transforms are
-`unknown_attributes`, `frame_removal`, `dead_code`, `goto_inlining`, and
-`redundant_try_catch`. Processing is restricted to the primary JVM resource
-and can be narrowed by internal-name prefix. Dry runs return the same bounded
-modified-class, per-transformer, removal, mapping, and failure summaries but do
-not call `apply()`. Any transformer failure also prevents all result changes
-from being applied.
+`unknown_attributes`, `frame_removal`, `dead_code`, `goto_inlining`,
+`redundant_try_catch`, `long_annotations`, `long_exceptions`, `duplicate_catches`,
+`variable_table_normalization`, `opaque_constants`, `opaque_predicates`,
+`variable_folding`, `static_value_inlining`, `call_result_inlining`, and
+`invokedynamic_inlining`. Processing is restricted to primary JVM bundles,
+including multi-release bundles, and can be narrowed by internal-name prefix.
+Nested archives and supporting libraries resolve types but are excluded from
+transformation. Native dependencies are included by Recaf. All phases run on
+a detached snapshot capped at 256 MiB of JVM class bytes including libraries.
+Only a fully successful plan may commit to the current workspace, after
+rechecking its classes; dry runs, cancellation, and failures leave it unchanged.
+The result includes bounded class, transformer, removal, mapping, and failure
+summaries. Saving remains explicit.
+
+`options` maps selected transformer aliases to typed per-run settings; unknown
+keys, wrong types/ranges, and options for unselected aliases are rejected.
+Settings never modify Recaf's persistent configuration.
+For `static_value_inlining`, `max_steps` limits its upstream static-value
+collection dependency.
+
+| Transformer | Option | Default | Allowed values |
+| --- | --- | --- | --- |
+| `long_annotations`, `long_exceptions` | `max_length` | 150 | Integer 1–10,000 |
+| `duplicate_catches` | `min_block_threshold` | 4 | Integer 1–1,024 |
+| `static_value_inlining`, `call_result_inlining`, `invokedynamic_inlining` | `max_steps` | 20,000 | Integer 1–1,000,000 |
+| `goto_inlining` | `backwards_switch_flow` | false | Boolean |
+| `redundant_try_catch` | `delete_junk_workspace_exceptions` | false | Boolean |
+| `call_result_inlining` | `evaluate_class_initializers` | false | Boolean |
+
+For ordered execution, supply one to eight `phases` instead of top-level
+`transformers`/`options`/`max_passes`. Each phase requires a unique `id` matching
+`[A-Za-z0-9_-]{1,64}` and a nonempty allowlisted `transformers` array, with optional
+`options` and `max_passes` (1–3, default 1). `phases` echoes the effective plan
+and options, while `phase_results` reports ID, status (`stable`, `max_passes`,
+`failed`, `cancelled`, `skipped`), passes, and modified/removed class counts.
+Reaching the pass bound is a successful bounded result, not a fixed-point
+guarantee. Dependencies owned by a later phase are rejected by Recaf.
+
+Example request:
+
+```json
+{"database":"<id>","class_prefix":"sample/","dry_run":true,"phases":[
+  {"id":"cleanup","transformers":["long_annotations"],"options":{"long_annotations":{"max_length":40}}},
+  {"id":"fold","transformers":["opaque_constants"]},
+  {"id":"finish","transformers":["dead_code"]}
+]}
+```
+
+Example structured response excerpt for a class containing a long annotation
+and constant arithmetic:
+
+```json
+{"applied":false,"dry_run":true,"modified_class_count":1,"modified_classes":["sample/Obfuscated"],
+ "failure_count":0,"phase_results":[
+   {"id":"cleanup","passes":1},
+   {"id":"fold","passes":1},
+   {"id":"finish","passes":1}
+ ]}
+```
 
 `patch_class(database, class_name, source, target_version_policy="preserve")`
 compiles complete Java source against the current Recaf workspace and replaces
@@ -508,16 +599,16 @@ and original/patched SHA-256 hashes. Saving remains explicit through
 dex_name?, if_sha256?)` resolves one exact JVM or Android method. JVM scope
 returns the complete editable Recaf Jasm document with `assembly_sha256`, owning class
 hash, access flags, classfile version, and bounded assembler diagnostics.
-Android scope returns complete native DEX instruction text with offsets,
-register/in/out counts, DEX version, and `editable=false` /
-`patch_supported=false`. Text-only clients receive Jasm in a `jasm` fence and
-Android disassembly in a read-only `text` fence. Only the JVM document may be
-passed to `patch_instructions`. Passing `assembly_sha256` back as
+Android scope returns editable Dalvik Jasm with register/in/out counts,
+DEX version, `assembly_format="recaf_jasm_dalvik_method"`, `editable=true`,
+and `patch_supported=true`. Text-only clients receive either form in a `jasm`
+fence. Pass the returned Android `dex_name` to `patch_instructions` to select
+the same DEX. Passing `assembly_sha256` back as
 `if_sha256` returns `unchanged=true` and method/hash metadata without the
 assembly body in either scope.
 
 `patch_instructions(database, owner, name, descriptor, assembly,
-expected_assembly_sha256, dry_run=false)` parses, analyzes, and assembles that
+expected_assembly_sha256, dry_run=false, scope="jvm", dex_name?)` parses, analyzes, and assembles that
 complete method against its current class. The expected hash must still match
 a fresh disassembly, so an edit cannot silently overwrite a newer method.
 `dry_run=true` validates without changing the workspace. A successful apply is
@@ -527,6 +618,11 @@ access, signature, annotations, default, or declared exceptions. The source is
 capped at 1,000,000 characters, output at 32 MiB, and diagnostics at 100
 entries. This path uses Recaf's assembler directly and does not require a
 decompiler or `javac`; saving remains explicit.
+For `scope="android"`, assembly uses a detached DEX tree and rejects changes
+to declarations or any other method. Duplicate owner names require `dex_name`.
+The owning class hash is checked again before replacement. Failed patches and
+dry runs leave the workspace unchanged; successful Dalvik edits survive
+APK/DEX save and reopen. Saved APKs are unsigned.
 
 `get_class_bytecode(database, class_name, scope="jvm", dex_name?, offset=0,
 limit=32768, if_sha256?)` returns standard Base64 pages. JVM scope returns the
@@ -555,9 +651,23 @@ compiles and returns up to 100 bounded diagnostics. To execute, callers must
 set both `compile_only=false` and `acknowledge_full_worker_access=true`.
 Captured `System.out` is capped at 256 KiB; a final single-line
 `MCP_RESULT <json>` value is also returned as `script_result`. Primary ordinary
-JVM bundle additions, updates, and removals are reported as a stable page of at
-most 200 changed class names, and the original current workspace is restored
-if the script replaces it.
+JVM and primary Android bundle additions, updates, and removals are reported as
+a stable page of at most 200 sorted, unique changed class names. The response
+uses `change_observation_scope="primary_jvm_and_android_bundle_events"`; it
+observes bundles present at script startup and requires `bundle.put` for direct
+tree edits. The original current workspace is restored if the script replaces it.
+`workspace_changed` reports replacement or closure of the current workspace object,
+and `workspace_restored` reports restoration of that object. In-place class edits
+normally leave both false; inspect the class lists and counts for those edits.
+
+For Android batch editing, iterate `getAndroidClassBundles()`, edit the native DEX
+trees from `AndroidClassInfo.getBackingDefinition()`, then put a rebuilt
+`AndroidClassInfo` into its original bundle. Read the `workspace` script guide for
+the exact APIs, a complete constant replacement, method-map traversal, and the
+invoke-range factory's register-count/first-register argument order. Editing a
+converted JVM view does not update saved DEX bytecode.
+One script can modify many classes across DEX entries; use `recaf_save` afterward
+and sign the exported APK before installation.
 
 Scripts have the full Worker's filesystem, network, process, JVM, and Recaf
 service permissions. Java provides no useful in-process sandbox for this use
@@ -566,6 +676,28 @@ leave partial in-memory workspace or external side effects. The Bridge still
 isolates the Worker and data directory, serializes all operations, requires an
 explicit save, and destroys the Worker if a cancelled script does not drain.
 Use compile-only preflight and read `get_recaf_script_help` before execution.
+
+Runtime errors retain `runtime_error_type` / `runtime_error_message` for the outer
+exception. `runtime_error_chain` adds up to eight entries in outer-to-inner order,
+each containing `type`, `message`, `stack_trace` (up to 12 frames), and
+`stack_trace_truncated`. Messages are limited to 1,000 characters and frames to
+500 characters. When the cause chain is complete, `runtime_root_cause_type` and
+`runtime_root_cause_message` identify its deepest cause. A cycle or depth limit
+sets `runtime_error_chain_truncated=true` and omits the root-cause fields. Partial
+class changes remain visible in the usual change lists after a runtime failure.
+
+For example, this request deliberately throws a nested exception:
+
+```json
+{"database":"<database>","script":"throw new IllegalStateException(\"DEX wrapper\", new IllegalArgumentException(\"invalid DEX operand\"));","compile_only":false,"acknowledge_full_worker_access":true}
+```
+
+The error's `structuredContent` includes these fields (additional Recaf wrappers
+may appear earlier in `runtime_error_chain`):
+
+```json
+{"runtime_root_cause_type":"java.lang.IllegalArgumentException","runtime_root_cause_message":"invalid DEX operand","runtime_error_chain_truncated":false}
+```
 
 ## Test
 
@@ -599,4 +731,10 @@ scope schemas, multi-DEX
 identity, Android-to-JVM source decompilation, reconstructed single-class DEX
 bytes, native DEX instruction search/disassembly, a full-APK call-graph index,
 Android source/string/member searches, in-memory method/class renames, all
-seven mapping-text exports, and default close without creating a JAR.
+seven mapping-text exports, and default close saving an unsigned APK.
+The reusable `scripts/test_real_worker.py` runner also generates multi-DEX APK,
+raw DEX, and runnable JVM fixtures. It verifies editable Dalvik round trips,
+structural searches, each expanded transformer alias, phased dry-run/apply,
+save/reopen, unchanged non-target content, and equal program output before
+and after JVM transformation. Set `RECAF_MCP_TEST_GENERATED_ANDROID_DIR` or
+`RECAF_MCP_TEST_GENERATED_JVM_JAR` when running these tests directly.

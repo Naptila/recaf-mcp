@@ -63,4 +63,22 @@ class GetRecafScriptHelpToolTest {
         arguments.addProperty("topic", "test2-xor");
         assertThrows(IllegalArgumentException.class, () -> tool.execute(arguments));
     }
+
+    @Test
+    void workspaceGuideExplainsNativeAndroidBatchEditsAndObservedChanges() {
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("topic", "workspace");
+        String guide = tool.execute(arguments).getAsJsonObject("structuredContent").get("guide").getAsString();
+        assertTrue(guide.contains("getAndroidClassBundles()"));
+        assertTrue(guide.contains("getBackingDefinition()"));
+        assertTrue(guide.contains("AndroidClassInfoBuilder"));
+        assertTrue(guide.contains("bundle.put"));
+        assertTrue(guide.contains("without `bundle.put` are not observed"));
+        assertTrue(guide.contains("Map<MemberIdentifier, MethodMember>"));
+        assertTrue(guide.contains("Map<MemberIdentifier, FieldMember>"));
+        assertTrue(guide.contains("MoveExceptionInstruction(int register)"));
+        assertTrue(guide.contains("instructions.set(index, replacement)"));
+        assertTrue(guide.contains("register word count, then first physical register"));
+        assertTrue(guide.contains("workspace_changed=false"));
+    }
 }

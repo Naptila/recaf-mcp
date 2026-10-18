@@ -23,7 +23,7 @@ target Java 22.
 boundaries. Its production output is:
 
 ```text
-build/libs/recaf-mcp-plugin-1.0.2.jar
+build/libs/recaf-mcp-plugin-1.1.0.jar
 ```
 
 The build checks the service entry and verifies that the plugin does not shade
@@ -31,6 +31,18 @@ Recaf or Gson. JAR ordering and timestamps are reproducible. Copy the JAR into
 Recaf's standard `plugins` directory; see the root README for platform paths.
 Without the Bridge-owned `RECAF_MCP_TOKEN`, a normal Recaf launch leaves the
 MCP server dormant.
+
+Android fidelity tests use an independent dexlib2 encoder/parser (test dependency
+only). The opt-in real-Worker runner invokes `generateAndroidFidelityFixture` to
+generate compact numeric values, nullable parameter names, debug tables and
+cross-DEX callers in its temporary directory. No binary fixtures are checked in.
+
+Before reporting Android workspace readiness, the Worker repairs encoded values
+in detached DEX items and reads modeled debug information. Android remapping
+preserves unnamed debug parameters and propagates preparation failures. Export
+validates field values and modeled debug tables before atomic installation.
+Java source tools use detached JVM conversion with corrected array effects and
+ASM-verified fallback output; the saved DEX keeps its own instruction bodies.
 
 ## Development launch
 
@@ -84,8 +96,8 @@ Authenticated internal methods are:
 - `health`: process/build/schema/workspace identity, readiness, archive-export
   capability, busy/closing state, and bounded last error;
 - `cancel_operation`: interrupt one exact Bridge-owned operation ID;
-- `save_workspace`: low-level JVM primary-resource export with ZIP validation
-  and atomic installation; APK/DEX workspaces are rejected;
+- `save_workspace`: original-format JAR/APK/DEX export, format validation and
+  atomic installation; APK output is unsigned;
 - `shutdown`: response-before-exit graceful termination;
 - `probe/headless_services`: retained headless regression probe.
 
@@ -102,7 +114,7 @@ Every public call has a private operation ID and a cost-based deadline:
 | Timeout | Tools |
 | --- | --- |
 | 15 seconds | `workspace_info`, `list_classes`, `list_files`, `get_class_bytecode`, `get_recaf_script_help` |
-| 60 seconds | `read_file`, `decompile_class`, `search_strings`, `search_instructions`, `search_members`, `rename_symbol`, `export_mappings`, `get_method_assembly` |
+| 60 seconds | `read_file`, `decompile_class`, `search_strings`, `search_instructions`, `search_members`, `search_structure`, `rename_symbol`, `export_mappings`, `get_method_assembly` |
 | 120 seconds | `search_code`, `call_graph`, `patch_instructions` |
 | 300 seconds | `apply_mappings`, `transform_workspace`, `patch_class`, `run_recaf_script` |
 | 1,800 seconds | `export_sources` |
@@ -175,13 +187,13 @@ never defines the Bridge-owned `database` property.
   before sorting and pagination.
 - `rename_symbol`: exact JVM or Android class/member rename through Recaf's
   search and mapping services. Android requests accept DEX identity, select
-  only declarations/referrers for bounded memory, and are session-only.
+  only declarations/referrers for bounded memory, and persist through APK/DEX save.
 - `apply_mappings`: inline mapping text parsed by Recaf in any installed
   text format. Its runtime enum currently exposes Enigma, Jadx (Legacy),
   Proguard, Simple, SRG, Tiny-V1, and Tiny-V2. It supports dry-run, optional
   globally unique-key lookup, collision checks, bounded changed-class pages,
   explicit scope/save semantics, and JVM/Android/DEX change identities.
-  Android mappings are in-memory only and do not enable APK rebuilding.
+  Android mappings persist when the Bridge saves the APK/DEX workspace.
 - `export_mappings`: the current session's `AggregateMappingManager` history
   exported in the same runtime-discovered seven formats. Original-to-current
   UTF-8 text uses 32 Ki-character default/512 Ki-character maximum pages, a
@@ -199,18 +211,38 @@ never defines the Bridge-owned `database` property.
   stopped. JVM scope uses Recaf's call graph; Android scope indexes symbolic
   DEX invoke instructions and reverse callers across the selected DEX classes.
 - `transform_workspace`: reviewed transformer aliases only, primary JVM scope,
-  dry-run support, and apply-only-after-success behavior.
+  typed per-run `options`, up to eight ordered native Recaf `phases` with unique
+  IDs and one to three passes each, and per-phase statuses/counts. Extra aliases
+  cover long annotations/exceptions, duplicate catches, variable tables,
+  constant/predicate/variable folding, and static/call/invokedynamic inlining.
+  The existing four conservative metadata defaults are unchanged. All phases
+  run on detached JVM class bundles (including multi-release bundles), capped
+  at 256 MiB of snapshot class bytes including supporting resources. Nested
+  archives and libraries resolve types but are excluded from transformation.
+  `class_prefix` constrains committed changes, the live class bytes are
+  rechecked before commit, and failed plans/dry runs leave them untouched.
+  Exact aliases and option bounds are in the Bridge README.
+- `search_structure`: native Recaf `ClassQuery` matching across JVM/Android
+  primary classes. The required `query` combines class names/access masks and
+  up to eight field and eight method requirements; method descriptors are exact,
+  names are exact unless their nested `regex=true`, and opcode bags allow up to
+  32 numeric native opcodes with multiplicity. Empty lists require absence.
+  Access masks are nonnegative 16-bit integers and cannot overlap. Default
+  `scope=jvm`; `android` accepts exact `dex_name`, and `all` scans both backends.
+  Stable class/domain/DEX ordering, 10 default/200 maximum page size, and a
+  20,000-hit collection cap keep responses bounded; `collection_truncated`
+  identifies a partial count. Hits preserve `class_scope` and `dex_name`.
 - `patch_class`: complete source compiled against the workspace; 750,000 source
   characters, 100 related outputs, 32 MiB output, and bounded diagnostics. It
   preserves the input classfile target by default. Legacy inputs below the
   current javac minimum require explicit `target_version_policy` =
   `minimum_supported`; responses report input and output Java/classfile
   versions and reject compiler output at an unexpected target.
-- `get_method_assembly`: complete Recaf Jasm text for one exact primary JVM
-  method, or complete read-only DEX instruction text for an Android method.
-  Output is capped at 1,000,000 characters. Only the JVM form is editable and
-  is a valid base for `patch_instructions`; Android results explicitly report
-  `editable=false` and `patch_supported=false`. Matching optional
+- `get_method_assembly`: complete editable Recaf JVM or Dalvik Jasm text for
+  one exact primary method. Android results use
+  `assembly_format=recaf_jasm_dalvik_method`; select `scope=android` and use
+  the returned `dex_name` when patching. Output is capped at 1,000,000 characters.
+  Matching optional
   `if_sha256` suppresses the complete assembly while retaining its hash and
   method metadata in either scope.
 - `patch_instructions`: assembles a complete method document, not a fragment.
@@ -220,6 +252,11 @@ never defines the Bridge-owned `database` property.
   classfile version, class access, field/method declaration topology, and
   target method access/signature/annotations/throws metadata; valid changes are
   applied with one bundle replacement and limited to 32 MiB.
+  Dalvik assembly runs on a detached DEX tree and permits changes only inside
+  the target method body; declarations and every other member must remain
+  unchanged. Duplicate Android owners require an exact `dex_name`. Both paths
+  recheck the owner class hash before replacement; failures and dry runs leave
+  the workspace untouched. APK/DEX edits can be persisted with `recaf_save`.
 - `get_class_bytecode`: standard Base64, 32 KiB default/1 MiB maximum pages,
   16 MiB class guard, full-class size and SHA-256 metadata. JVM scope returns
   the original classfile. Android scope reconstructs a valid standalone DEX
@@ -234,24 +271,32 @@ never defines the Bridge-owned `database` property.
   500,000 characters. It defaults to non-executing compile-only preflight;
   execution requires explicit full-Worker-access acknowledgement. Compiler
   diagnostics are capped at 100, stdout at 256 KiB, changed-class pages at 200,
-  and a final `MCP_RESULT <json>` line is exposed structurally. Primary JVM
-  bundle events are observed, but arbitrary script side effects are not
+  and a final `MCP_RESULT <json>` line is exposed structurally. Primary ordinary
+  JVM and Android bundle events are observed, but arbitrary script side effects are not
   sandboxed, atomic, or rolled back. A script-replaced current workspace is
   restored when possible, cancellation uses Recaf's cooperative script stop,
   and saving remains explicit.
+
+The `workspace` script guide includes a complete DEX constant replacement,
+`ClassDefinition.getMethods().values()` traversal, and the exact invoke-range
+factory argument order. `workspace_changed` means the current workspace object
+was replaced or closed; class edits are reported by the separate change lists.
+Runtime errors retain their outer type/message and add `runtime_error_chain`
+(up to eight causes, 12 stack frames per cause, 1,000 characters per message,
+500 per frame). Each cause reports whether its stack frames were truncated.
+`runtime_root_cause_type` and `runtime_root_cause_message` are present only when
+the chain is complete; a depth limit or cycle sets
+`runtime_error_chain_truncated=true` instead.
 
 All class names use internal form. The Android-aware analysis tools expose
 `scope` (`jvm`, `android`, and `all` where a scan is meaningful) and optional
 `dex_name`; JVM is always the compatibility default. Every Android hit reports
 its DEX identity, so multi-DEX names remain unambiguous. Member operations use
-JVM-style descriptors for both class domains. Android bytecode patching,
-transformation, saving, and archive export are unsupported. Symbol mapping is
-the bounded exception: `rename_symbol` and `apply_mappings` mutate DEX class
-trees in memory, while `export_mappings` returns their aggregate mapping text.
-`export_sources` may write derived Android Java source to a ZIP; it
-does not rebuild or modify the APK. JVM mutations are in-memory until the
-Bridge explicitly saves them. The Bridge gives APK sessions no autosave path
-and closes them without export when `save` is omitted.
+JVM-style descriptors for both class domains. Android source patching and JVM
+transformations remain unsupported. Symbol mapping mutates DEX trees in memory;
+`save_workspace` persists all bundles in the original APK/DEX format. Source and
+mapping exports are independent. The Bridge saves JAR/APK/DEX by default on close.
+APK outputs are unsigned, with old signatures removed and ZIP entries aligned.
 
 Invalid tool arguments preserve a bounded diagnostic in the JSON-RPC error.
 Invalid regular expressions identify the selector, Java regex description,
@@ -272,12 +317,12 @@ An analysis Worker is ready only when authenticated health reports
 `ready=true`, `workspace_open=true`, and `workspace_ready=true`; the canonical
 expected/input paths, process PID, plugin build, and schema fingerprint must
 also match the Bridge's launch record. Health reports
-`workspace_archive_export_supported=false` for an APK, DEX, or any primary
-resource containing Android class bundles.
+`workspace_archive_export_supported` and `workspace_output_format` (`jar`, `apk`,
+`dex`, or null for unsupported inputs).
 
-Saving exports only a supported JVM primary resource to a temporary sibling
-with Recaf's low-level workspace exporter, validates a nonempty ZIP/JAR, and
-atomically installs it. Android workspace export is rejected before creating a
-temporary output. Input aliases and unapproved existing destinations are
+Saving exports only the primary resource to a temporary sibling, validates
+a nonempty ZIP for JAR/APK or parses raw DEX, and atomically installs it. APK/DEX
+destinations must use the corresponding extension. The result reports `format`
+and `apk_signature_status` (`unsigned` for APK; `not_applicable` otherwise). Input aliases and unapproved existing destinations are
 rejected. A failed save leaves the Worker ready and records a retryable
 `last_error`; a later successful save clears it.
