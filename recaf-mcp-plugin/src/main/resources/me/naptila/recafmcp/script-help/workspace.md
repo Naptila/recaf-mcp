@@ -87,6 +87,7 @@ opcode's literal range and register limits.
 
 ```java
 import me.darknet.dex.tree.definitions.instructions.ConstInstruction;
+import me.darknet.dex.tree.definitions.code.Code;
 import software.coley.recaf.info.builder.AndroidClassInfoBuilder;
 
 String dexName = "classes.dex";
@@ -97,7 +98,8 @@ if (info == null) throw new IllegalStateException("Target not found");
 var method = info.getBackingDefinition().getMethod("mix", "(I)I");
 if (method == null || method.getCode() == null)
     throw new IllegalStateException("Method with code not found");
-var instructions = method.getCode().getInstructions();
+var code = method.getCode();
+var instructions = new java.util.ArrayList<>(code.getInstructions());
 int index = -1;
 ConstInstruction original = null;
 for (int i = 0; i < instructions.size(); i++) {
@@ -112,11 +114,19 @@ var replacement = new ConstInstruction(original.opcode(), original.register(), 1
 if (replacement.unitSize() != original.unitSize())
     throw new IllegalStateException("Instruction width changed");
 instructions.set(index, replacement);
+var updated = new Code(code.getIn(), code.getOut(), code.getRegisters());
+updated.addInstructions(instructions);
+code.tryCatch().forEach(updated::addTryCatch);
+if (code.getDebugInfo() != null) updated.setDebugInfo(code.getDebugInfo());
+method.setCode(updated);
 bundle.put(new AndroidClassInfoBuilder(info.getBackingDefinition()).build());
 System.out.println("MCP_RESULT {\"replacements\":1}");
 ```
 
-The shown instruction objects are immutable; replace them in the instruction list. The
+`Code.getInstructions()` returns a read-only view in the pinned DEX version.
+Copy it, edit the copy, and install a new `Code` as shown, retaining register counts,
+try/catch regions and debug metadata. Old instruction offsets are invalid after
+an edit and are recomputed when encoding. The shown instruction objects are immutable. The
 three-int `ConstInstruction(opcode, register, value)` constructor above preserves
 the existing opcode and destination register. For a binary literal instruction,
 use `new BinaryLiteralInstruction(old.opcode(), old.dest(), old.src(), newValue)`

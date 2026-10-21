@@ -282,18 +282,28 @@ class BridgeToolService:
 
     async def _list_sessions(self) -> types.CallToolResult:
         now = time.monotonic()
+        snapshot = await self._sessions.snapshot_state()
         sessions = [
             self._public_session(session, now)
-            for session in await self._sessions.snapshot()
+            for session in snapshot.sessions
         ]
         text = (
             "No Recaf sessions are open."
-            if not sessions
-            else f"{len(sessions)} Recaf session(s) open."
+            if snapshot.occupied_slots == 0
+            else f"{len(sessions)} Recaf session(s) open, {len(snapshot.pending_ids)} starting."
         )
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=text)],
-            structuredContent={"sessions": sessions},
+            structuredContent={
+                "sessions": sessions,
+                "pending_sessions": [
+                    {"database": sid, "state": "starting"}
+                    for sid in snapshot.pending_ids
+                ],
+                "occupied_slots": snapshot.occupied_slots,
+                "max_sessions": snapshot.max_sessions,
+                "available_slots": snapshot.max_sessions - snapshot.occupied_slots,
+            },
             isError=False,
         )
 
@@ -536,6 +546,7 @@ class BridgeToolService:
                         "destination": str(destination),
                         "overwrite": managed or overwrite,
                     },
+                    timeout_sec=310.0,
                 )
             except WorkerMethodError as error:
                 raise SaveWorkspaceError(str(error)) from error

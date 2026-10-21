@@ -78,6 +78,8 @@ class GetRecafScriptHelpToolTest {
         assertTrue(guide.contains("Map<MemberIdentifier, FieldMember>"));
         assertTrue(guide.contains("MoveExceptionInstruction(int register)"));
         assertTrue(guide.contains("instructions.set(index, replacement)"));
+        assertTrue(guide.contains("read-only view"));
+        assertTrue(guide.contains("method.setCode(updated)"));
         assertTrue(guide.contains("register word count, then first physical register"));
         assertTrue(guide.contains("workspace_changed=false"));
     }

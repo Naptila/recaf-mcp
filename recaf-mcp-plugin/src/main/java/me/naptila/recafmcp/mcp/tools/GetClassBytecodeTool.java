@@ -3,10 +3,7 @@ package me.naptila.recafmcp.mcp.tools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import me.darknet.dex.file.DexHeader;
-import me.darknet.dex.file.DexMapBuilder;
-import me.darknet.dex.io.GrowingOutput;
-import me.darknet.dex.tree.DexFile;
+import me.naptila.recafmcp.mcp.android.AndroidDexReader;
 import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import software.coley.recaf.info.AndroidClassInfo;
@@ -15,7 +12,6 @@ import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.workspace.model.Workspace;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -207,17 +203,7 @@ public final class GetClassBytecodeTool implements McpTool {
 
     static byte[] singleClassDex(AndroidClassInfo classInfo,
                                          int dexVersion) throws IOException {
-        DexFile file = new DexFile(
-                dexVersion,
-                List.of(classInfo.getBackingDefinition())
-        );
-        DexHeader header = DexFile.CODEC.unmap(file, new DexMapBuilder());
-        GrowingOutput output = new GrowingOutput();
-        DexHeader.CODEC.write(header, output);
-        ByteBuffer buffer = output.buffer();
-        byte[] bytes = new byte[buffer.remaining()];
-        buffer.get(bytes);
-        return bytes;
+        return AndroidDexReader.encodeClass(classInfo, dexVersion);
     }
 
     private static String exceptionMessage(Throwable throwable) {

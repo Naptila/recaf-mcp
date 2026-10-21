@@ -1,8 +1,8 @@
 package me.naptila.recafmcp.mcp.android;
 
 import me.darknet.dex.convert.DexConversionIr;
-import me.darknet.dex.convert.DexConversionSimple;
 import me.darknet.dex.convert.ir.lowering.JvmLoweringPolicy;
+import me.darknet.dex.tree.definitions.ClassDefinition;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.ClassNode;
@@ -20,23 +20,24 @@ public final class AndroidJvmConverter {
     private AndroidJvmConverter() {}
 
     public static JvmClassInfo convert(AndroidClassInfo info) throws IOException {
+        return convert(info, AndroidJvmConverter::convertDefinition);
+    }
+
+    static JvmClassInfo convert(AndroidClassInfo info, Conversion conversion) throws IOException {
         if (!info.canMapToJvmClass()) {
             throw new IOException("Android class cannot be mapped to JVM bytecode");
         }
         byte[] snapshot = AndroidDexReader.encodeClass(info, 39);
         try {
-            var conversion = new DexConversionIr();
-            conversion.setJvmLoweringPolicy(JvmLoweringPolicy.DETERMINISTIC_LOCAL);
-            conversion.setOptimizerFactory(context -> new AndroidConversionOptimizer());
             var definition = AndroidDexReader.readClass(snapshot, info.getName()).getBackingDefinition();
-            return validated(conversion.toJavaClass(definition));
+            return validated(conversion.convert(definition, JvmLoweringPolicy.DETERMINISTIC_LOCAL));
         } catch (RuntimeException | AnalyzerException primary) {
             ToolCancellation.propagateIfRequested(primary);
             try {
                 // Use a fresh snapshot: the failed converter may have changed
                 // metadata in its private tree while preparing the source view.
                 var definition = AndroidDexReader.readClass(snapshot, info.getName()).getBackingDefinition();
-                return validated(new DexConversionSimple().toJavaClass(definition));
+                return validated(conversion.convert(definition, JvmLoweringPolicy.AGGRESSIVE_OPTIMIZED));
             } catch (RuntimeException | AnalyzerException fallback) {
                 ToolCancellation.propagateIfRequested(fallback);
                 var failure = new IOException("Android-to-JVM conversion failed verification: " + info.getName(), primary);
@@ -44,6 +45,18 @@ public final class AndroidJvmConverter {
                 throw failure;
             }
         }
+    }
+
+    static byte[] convertDefinition(ClassDefinition definition, JvmLoweringPolicy policy) {
+        var conversion = new DexConversionIr();
+        conversion.setJvmLoweringPolicy(policy);
+        conversion.setOptimizerFactory(context -> new AndroidConversionOptimizer());
+        return conversion.toJavaClass(definition);
+    }
+
+    @FunctionalInterface
+    interface Conversion {
+        byte[] convert(ClassDefinition definition, JvmLoweringPolicy policy);
     }
 
     private static JvmClassInfo validated(byte[] bytes) throws AnalyzerException {

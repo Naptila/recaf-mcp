@@ -23,7 +23,7 @@ target Java 22.
 boundaries. Its production output is:
 
 ```text
-build/libs/recaf-mcp-plugin-1.1.0.jar
+build/libs/recaf-mcp-plugin-1.1.1.jar
 ```
 
 The build checks the service entry and verifies that the plugin does not shade
@@ -296,7 +296,7 @@ JVM-style descriptors for both class domains. Android source patching and JVM
 transformations remain unsupported. Symbol mapping mutates DEX trees in memory;
 `save_workspace` persists all bundles in the original APK/DEX format. Source and
 mapping exports are independent. The Bridge saves JAR/APK/DEX by default on close.
-APK outputs are unsigned, with old signatures removed and ZIP entries aligned.
+APK outputs have old signatures removed; align and sign them before installation.
 
 Invalid tool arguments preserve a bounded diagnostic in the JSON-RPC error.
 Invalid regular expressions identify the selector, Java regex description,

@@ -12,6 +12,7 @@ import software.coley.recaf.info.AndroidClassInfo;
 import software.coley.recaf.path.PathNodes;
 import software.coley.recaf.services.assembler.AssemblerPipelineManager;
 import me.naptila.recafmcp.mcp.android.AndroidDexReader;
+import me.naptila.recafmcp.mcp.android.AndroidDexWriter;
 import software.coley.recaf.workspace.model.Workspace;
 
 import java.io.IOException;
@@ -34,15 +35,18 @@ final class AndroidAssemblySupport {
             method.getCode().setDebugInfo(null);
             labels(method.getCode()).forEach(label -> label.lineNumber(Label.UNASSIGNED));
         }
-        // Physical registers avoid allocating new aliases from debug-local names.
+        // Omit debug-local names and explicit parameter names. Jasm 3.1 can still
+        // print positional pN/this aliases; it resolves them from the signature.
         // Debug metadata is retained separately when the method body is replaced.
-        var printer = new DalvikClassPrinter(detached.getBackingDefinition()).method(name, descriptor);
-        if (printer == null) {
-            throw new IllegalArgumentException("method not found in Android owner");
-        }
-        var context = new PrintContext<>("    ");
-        printer.print(context);
-        return context.toString();
+        return AndroidDexWriter.withCompatibility(() -> {
+            var printer = new DalvikClassPrinter(detached.getBackingDefinition()).method(name, descriptor);
+            if (printer == null) {
+                throw new IllegalArgumentException("method not found in Android owner");
+            }
+            var context = new PrintContext<>("    ");
+            printer.print(context);
+            return context.toString();
+        });
     }
 
     static byte[] bytes(AndroidClassInfo info, int version) throws IOException {
@@ -84,9 +88,10 @@ final class AndroidAssemblySupport {
             if (submitted.getCode() == null) throw new IOException("Android patch must contain a method body");
             if (!submitted.getParameters().isEmpty()
                     || submitted.getCode().getInstructions().stream().anyMatch(instruction -> instruction.content().equals("line"))) {
-                throw new IOException("Android instruction patches preserve existing debug metadata; keep physical registers and omit debug directives");
+                throw new IOException("Android instruction patches preserve existing debug metadata; omit debug directives and parameter-name declarations");
             }
-            var assembled = pipeline.assembleAndWrap(parsed.requireValue(), path);
+            var assembled = AndroidDexWriter.withCompatibility(
+                    () -> pipeline.assembleAndWrap(parsed.requireValue(), path));
             diagnostics.addAll(MethodAssemblySupport.RecafMethodAssembler.diagnostics("assemble", assembled));
             if (assembled.isSuccess()) {
                 var after = assembled.value().getBackingDefinition().getMethod(name, descriptor);

@@ -15,6 +15,10 @@ import me.darknet.dex.tree.definitions.InnerClass;
 import me.darknet.dex.tree.codec.definition.CodeCodec;
 import software.coley.recaf.info.AndroidClassInfo;
 import software.coley.recaf.info.builder.AndroidClassInfoBuilder;
+import software.coley.recaf.util.android.DexIOUtil;
+import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
+import software.coley.recaf.workspace.model.bundle.AndroidDexMetadata;
+import software.coley.recaf.workspace.model.bundle.BasicAndroidClassBundle;
 
 import java.io.IOException;
 import java.nio.ByteOrder;
@@ -31,6 +35,31 @@ public final class AndroidDexReader {
     private AndroidDexReader() {}
 
     public static DexFile read(byte[] bytes) throws IOException {
+        return decode(bytes).file();
+    }
+
+    /** Creates the clean bundle directly from the single repaired read, retaining export metadata. */
+    public static AndroidClassBundle readBundle(byte[] bytes,
+            AndroidDexMetadata.DexEntryProperties properties) throws IOException {
+        Decoded decoded = decode(bytes);
+        DexFile file = decoded.file();
+        var order = file.definitions().stream().map(definition -> definition.getType().internalName()).toList();
+        var layout = file.hiddenApi() == null ? List.<AndroidDexMetadata.DexClassLayout>of()
+                : DexIOUtil.getEncodedClassLayout(decoded.header());
+        var metadata = new AndroidDexMetadata(order, layout, file.hiddenApi(), properties);
+        var bundle = new BasicAndroidClassBundle(decoded.header().version(), decoded.header().link(), metadata);
+        for (var definition : file.definitions()) {
+            var info = new AndroidClassInfoBuilder(definition).build();
+            if (bundle.containsKey(info.getName())) throw new IOException("duplicate class definition in original DEX");
+            bundle.initialPut(info);
+        }
+        if (bundle.size() != decoded.header().map().classes().size()) {
+            throw new IOException("DEX class count differs from its header");
+        }
+        return bundle;
+    }
+
+    private static Decoded decode(byte[] bytes) throws IOException {
         try {
             DexHeader header = DexHeader.CODEC.read(Input.wrap(bytes));
             repairValues(bytes, header.map());
@@ -42,7 +71,12 @@ public final class AndroidDexReader {
                     CodeCodec.readDebug = true;
                     DexFile file = DexFile.CODEC.map(header, header.map());
                     restoreInnerClassFlags(header, file);
-                    return file;
+                    for (var definition : file.definitions()) {
+                        for (var method : definition.getMethods().values()) {
+                            if (method.getCode() != null) method.setCode(AndroidDebugSupport.repair(method.getCode()));
+                        }
+                    }
+                    return new Decoded(header, file);
                 } finally {
                     CodeCodec.readDebug = previous;
                 }
@@ -52,6 +86,8 @@ public final class AndroidDexReader {
         }
     }
 
+    private record Decoded(DexHeader header, DexFile file) {}
+
     public static AndroidClassInfo readClass(byte[] bytes, String name) throws IOException {
         return read(bytes).definitions().stream()
                 .filter(definition -> definition.getType().internalName().equals(name))
@@ -60,7 +96,8 @@ public final class AndroidDexReader {
     }
 
     public static byte[] encodeClass(AndroidClassInfo info, int version) throws IOException {
-        var header = DexFile.CODEC.unmap(new DexFile(version, List.of(info.getBackingDefinition())), new DexMapBuilder());
+        var header = AndroidDexWriter.withCompatibility(() -> DexFile.CODEC.unmap(
+                new DexFile(version, List.of(info.getBackingDefinition())), new DexMapBuilder()));
         var output = new GrowingOutput();
         DexHeader.CODEC.write(header, output);
         var buffer = output.buffer();

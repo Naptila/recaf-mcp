@@ -2,6 +2,9 @@ package me.naptila.recafmcp.mcp.internal;
 
 import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.android.AndroidDexValidator;
+import me.naptila.recafmcp.mcp.android.AndroidDexWriter;
+import me.naptila.recafmcp.mcp.android.AndroidArchiveExporter;
+import me.naptila.recafmcp.mcp.android.AndroidInputResource;
 import software.coley.recaf.info.ApkFileInfo;
 import software.coley.recaf.info.DexFileInfo;
 import software.coley.recaf.info.ZipFileInfo;
@@ -50,12 +53,22 @@ public final class RecafSaveWorkspaceHandler implements SaveWorkspaceHandler {
         if (input == null) {
             throw new IOException("workspace primary resource has no input path");
         }
+        if (fileResource instanceof AndroidInputResource android) android.checkInput();
 
+        AndroidArchiveExporter streaming = fileResource instanceof AndroidInputResource android && android.archive() != null
+                ? new AndroidArchiveExporter(android) : null;
         AtomicFileInstaller.PathWriter writer = temporary -> {
+            if (streaming != null) {
+                streaming.export(temporary);
+                return;
+            }
             WorkspaceExportOptions options = new WorkspaceExportOptions(
                     WorkspaceOutputType.FILE, new PathWorkspaceExportConsumer(temporary));
             options.setBundleSupporting(false);
-            options.create().export(workspace);
+            AndroidDexWriter.withCompatibility(() -> {
+                options.create().export(workspace);
+                return null;
+            });
         };
         AtomicFileInstaller.Result installed = format.equals("dex")
                 ? AtomicFileInstaller.install(input, Path.of(destination), overwrite, writer, path -> {
@@ -69,6 +82,7 @@ public final class RecafSaveWorkspaceHandler implements SaveWorkspaceHandler {
                 : AtomicFileInstaller.install(input, Path.of(destination), overwrite, writer, path -> {
                     try (ZipFile zip = new ZipFile(path.toFile())) {
                         if (zip.size() == 0) throw new IOException("export ZIP has no entries");
+                        if (streaming != null) streaming.validateFiles(zip);
                         for (var entry : workspace.getPrimaryResource().getAndroidClassBundles().entrySet()) {
                             var dex = zip.getEntry(entry.getKey());
                             if (dex == null) throw new IOException("DEX export is missing: " + entry.getKey());

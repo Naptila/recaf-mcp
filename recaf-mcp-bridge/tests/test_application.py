@@ -20,6 +20,29 @@ from worker import WorkerMethodError
 FINGERPRINT = "b" * 64
 
 
+def test_list_reports_pending_launches_and_capacity(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    manager = SessionManager(1)
+    service = BridgeToolService(config, sessions=manager, discovery=FakeDiscovery())
+
+    async def scenario() -> None:
+        sid = await manager.reserve_slot()
+        listed = await service.call("recaf_list", {})
+        assert listed.structuredContent == {
+            "sessions": [], "pending_sessions": [{"database": sid, "state": "starting"}],
+            "occupied_slots": 1, "max_sessions": 1, "available_slots": 0,
+        }
+        assert "1 starting" in listed.content[0].text
+        await manager.abandon(sid)
+        empty = (await service.call("recaf_list", {})).structuredContent
+        assert empty["pending_sessions"] == []
+        assert empty["occupied_slots"] == 0
+        assert empty["available_slots"] == 1
+        await service.close()
+
+    anyio.run(scenario)
+
+
 def make_config(root: Path) -> BridgeConfig:
     return BridgeConfig(
         recaf_jar=make_test_recaf_jar(root),
@@ -159,9 +182,11 @@ class FakeRpcClient:
         token: str,
         method: str,
         params: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
     ) -> dict[str, Any]:
         self.requests.append((port, token, method, params))
         if method == "save_workspace":
+            assert timeout_sec == 310.0
             assert params is not None
             destination = Path(params["destination"])
             destination.write_bytes(b"saved workspace")
@@ -429,6 +454,7 @@ def test_cancelled_close_still_aborts_and_releases_session(tmp_path: Path) -> No
             token: str,
             method: str,
             params: dict[str, Any] | None = None,
+            timeout_sec: float | None = None,
         ) -> dict[str, bool]:
             self.started.set()
             await anyio.sleep_forever()
@@ -486,6 +512,7 @@ def test_bridge_shutdown_registers_failed_save_without_killing_worker(
             token: str,
             method: str,
             params: dict[str, Any] | None = None,
+            timeout_sec: float | None = None,
         ) -> dict[str, Any]:
             if method == "save_workspace":
                 raise WorkerMethodError("autosave is read-only", -32011)

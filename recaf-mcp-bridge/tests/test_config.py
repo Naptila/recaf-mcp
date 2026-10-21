@@ -32,11 +32,27 @@ def test_environment_config_has_bounded_worker_limits(tmp_path: Path) -> None:
     assert config.plugin_jar == plugin_jar
     assert config.max_sessions == 3
     assert config.worker_max_heap_mb == 2048
+    assert config.worker_jvm_options == ["-Xmx2048m", "-XX:+ExitOnOutOfMemoryError"]
     assert config.default_idle_ttl_sec == 0
     assert config.response_profile == "compact"
     assert config.effective_recovery_dir == (
         tmp_path / "state" / "recaf-mcp" / "recovery"
     ).resolve()
+
+
+@pytest.mark.parametrize("max_sessions, percentage", [(1, "60"), (2, "30"), (4, "15")])
+def test_default_heap_shares_jvm_visible_ram_between_slots(
+    tmp_path: Path, max_sessions: int, percentage: str,
+) -> None:
+    config = BridgeConfig.from_env({
+        "RECAF_JAR": str(make_test_recaf_jar(tmp_path)),
+        "RECAF_PLUGIN_JAR": str(make_test_plugin_jar(tmp_path / "plugins")),
+        "RECAF_MAX_SESSIONS": str(max_sessions),
+    })
+    assert config.worker_max_heap_mb is None
+    assert config.worker_jvm_options == [
+        f"-XX:MaxRAMPercentage={percentage}", "-XX:+ExitOnOutOfMemoryError",
+    ]
 
 
 def test_environment_config_supports_legacy_response_profile(

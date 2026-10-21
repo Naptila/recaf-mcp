@@ -3,6 +3,7 @@ package me.naptila.recafmcp.mcp.internal;
 import me.naptila.recafmcp.AndroidFidelityFixture;
 import me.naptila.recafmcp.mcp.android.AndroidDexValidator;
 import me.naptila.recafmcp.mcp.android.AndroidWorkspaceSupport;
+import me.naptila.recafmcp.mcp.android.AndroidInputImporter;
 import org.jf.dexlib2.Opcodes;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.ClassDef;
@@ -35,28 +36,32 @@ class AndroidFidelitySaveTest {
         var importer = new BasicResourceImporter(new BasicInfoImporter(
                 new InfoImporterConfig(), new TextFormatConfig(), new BasicClassPatcher()),
                 new ResourceImporterConfig());
-        for (String format : List.of("dex", "apk")) {
-            Path input = directory.resolve("fidelity." + format);
-            byte[] original = Files.readAllBytes(input);
-            var workspace = new BasicWorkspace(importer.importResource(input), List.of(), false);
-            var manager = new BasicWorkspaceManager(new WorkspaceManagerConfig());
-            manager.setCurrentIgnoringConditions(workspace);
-            try {
-                AndroidWorkspaceSupport.prepare(workspace);
-                Path output = directory.resolve("saved." + format);
-                new RecafSaveWorkspaceHandler(manager).save(output.toString(), false);
-                byte[] actual;
-                if (format.equals("apk")) {
-                    try (var zip = new ZipFile(output.toFile())) {
-                        actual = zip.getInputStream(zip.getEntry("classes.dex")).readAllBytes();
-                        compare(AndroidFidelityFixture.secondDex(),
-                                zip.getInputStream(zip.getEntry("classes2.dex")).readAllBytes());
-                    }
-                } else actual = Files.readAllBytes(output);
-                compare(AndroidFidelityFixture.dex(), actual);
-                assertArrayEquals(original, Files.readAllBytes(input));
-            } finally {
-                manager.setCurrentIgnoringConditions(null);
+        for (boolean managed : List.of(false, true)) {
+            for (String format : List.of("dex", "apk")) {
+                Path input = directory.resolve("fidelity." + format);
+                byte[] original = Files.readAllBytes(input);
+                var resource = managed ? new AndroidInputImporter(new BasicInfoImporter(new InfoImporterConfig(),
+                        new TextFormatConfig(), new BasicClassPatcher())).readIfAndroid(input) : importer.importResource(input);
+                var workspace = new BasicWorkspace(resource, List.of(), false);
+                var manager = new BasicWorkspaceManager(new WorkspaceManagerConfig());
+                manager.setCurrentIgnoringConditions(workspace);
+                try {
+                    AndroidWorkspaceSupport.prepare(workspace);
+                    Path output = directory.resolve("saved-" + managed + "." + format);
+                    new RecafSaveWorkspaceHandler(manager).save(output.toString(), false);
+                    byte[] actual;
+                    if (format.equals("apk")) {
+                        try (var zip = new ZipFile(output.toFile())) {
+                            actual = zip.getInputStream(zip.getEntry("classes.dex")).readAllBytes();
+                            compare(AndroidFidelityFixture.secondDex(),
+                                    zip.getInputStream(zip.getEntry("classes2.dex")).readAllBytes());
+                        }
+                    } else actual = Files.readAllBytes(output);
+                    compare(AndroidFidelityFixture.dex(), actual);
+                    assertArrayEquals(original, Files.readAllBytes(input));
+                } finally {
+                    manager.setCurrentIgnoringConditions(null);
+                }
             }
         }
     }

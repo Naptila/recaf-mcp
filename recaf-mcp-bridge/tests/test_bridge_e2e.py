@@ -1273,7 +1273,10 @@ def test_open_list_and_workspace_info_end_to_end(tmp_path: Path) -> None:
                 assert closed.structuredContent["path"] == str(original_autosave)
                 assert zipfile.is_zipfile(original_autosave)
                 after_close = await client.call_tool("recaf_list", {})
-                assert after_close.structuredContent == {"sessions": []}
+                assert after_close.structuredContent == {
+                    "sessions": [], "pending_sessions": [], "occupied_slots": 0,
+                    "max_sessions": config.max_sessions, "available_slots": config.max_sessions,
+                }
 
                 reopened = await client.call_tool(
                     "recaf_open",

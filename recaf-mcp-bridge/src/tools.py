@@ -85,7 +85,9 @@ LIFECYCLE_TOOLS = (
     ),
     types.Tool(
         name="recaf_list",
-        description="List Recaf sessions without exposing bearer tokens.",
+        description=(
+            "List open and pending Recaf sessions and capacity without exposing bearer tokens."
+        ),
         inputSchema=_object_schema({}),
     ),
     types.Tool(

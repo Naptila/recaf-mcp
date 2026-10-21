@@ -67,7 +67,14 @@ public record RecafRuntimeInfo(String version, String commit, List<String> error
             conversion.getMethod("setOptimizerFactory", factory);
             Class<?> method = Class.forName("me.darknet.dex.convert.ir.IrMethod", false, loader);
             requireReturn(method.getMethod("blocks"), List.class);
-            Class.forName("me.darknet.dex.convert.DexConversionSimple", false, loader).getConstructor();
+            Class<?> policy = Class.forName("me.darknet.dex.convert.ir.lowering.JvmLoweringPolicy", false, loader);
+            conversion.getMethod("setJvmLoweringPolicy", policy);
+            policy.getField("DETERMINISTIC_LOCAL");
+            policy.getField("AGGRESSIVE_OPTIMIZED");
+            Class<?> code = Class.forName("me.darknet.dex.tree.definitions.code.Code", false, loader);
+            Class<?> instruction = Class.forName("me.darknet.dex.tree.definitions.instructions.Instruction", false, loader);
+            code.getMethod("offsetOf", instruction);
+            code.getMethod("addInstructions", List.class);
             Class.forName("software.coley.recaf.workspace.model.bundle.AndroidClassBundle", false, loader)
                     .getMethod("getDexMetadata");
         });

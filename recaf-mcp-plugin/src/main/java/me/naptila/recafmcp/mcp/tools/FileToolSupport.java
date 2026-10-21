@@ -2,6 +2,7 @@ package me.naptila.recafmcp.mcp.tools;
 
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import me.naptila.recafmcp.mcp.android.DeferredFileInfo;
 import software.coley.recaf.info.BinaryXmlFileInfo;
 import software.coley.recaf.info.FileInfo;
 import software.coley.recaf.info.TextFileInfo;
@@ -44,7 +45,9 @@ final class FileToolSupport {
     static void addSummary(JsonObject target, Entry entry) {
         FileInfo fileInfo = entry.fileInfo();
         target.addProperty("path", entry.path());
-        target.addProperty("size_bytes", fileInfo.getRawContent().length);
+        target.addProperty("size_bytes", fileInfo instanceof DeferredFileInfo deferred
+                ? deferred.size() : fileInfo.getRawContent().length);
+        if (fileInfo instanceof DeferredFileInfo deferred) fileInfo = deferred.preview();
         target.addProperty("kind", kind(fileInfo));
         target.addProperty("is_text", fileInfo.isTextFile());
         target.addProperty("text_available", isTextAvailable(fileInfo));

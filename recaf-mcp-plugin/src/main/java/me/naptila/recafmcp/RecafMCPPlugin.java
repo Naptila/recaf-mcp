@@ -8,6 +8,7 @@ import me.naptila.recafmcp.mcp.McpToolRegistry;
 import me.naptila.recafmcp.mcp.WorkerHealth;
 import me.naptila.recafmcp.mcp.RecafRuntimeInfo;
 import me.naptila.recafmcp.mcp.android.AndroidWorkspaceSupport;
+import me.naptila.recafmcp.mcp.android.AndroidInputImporter;
 import me.naptila.recafmcp.mcp.WorkerOperationCoordinator;
 import me.naptila.recafmcp.mcp.internal.HealthHandler;
 import me.naptila.recafmcp.mcp.internal.RecafHeadlessServicesProbe;
@@ -56,6 +57,10 @@ import software.coley.recaf.services.script.ScriptEngine;
 import software.coley.recaf.services.transform.TransformationApplierService;
 import software.coley.recaf.services.workspace.WorkspaceOpenListener;
 import software.coley.recaf.services.workspace.WorkspaceManager;
+import software.coley.recaf.services.workspace.io.ResourceImporterConfig;
+import software.coley.recaf.services.workspace.io.ResourceImporter;
+import software.coley.recaf.services.workspace.io.InfoImporter;
+import software.coley.recaf.workspace.model.BasicWorkspace;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.resource.WorkspaceFileResource;
 
@@ -64,6 +69,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Dependent
 @PluginInformation(
@@ -74,7 +81,7 @@ import java.util.List;
 )
 public class RecafMCPPlugin implements Plugin {
     public static final String PLUGIN_ID = "me.naptila.recaf-mcp-plugin";
-    public static final String PLUGIN_VERSION = "1.1.0";
+    public static final String PLUGIN_VERSION = "1.1.1";
     public static final String PLUGIN_NAME = "Recaf MCP Plugin";
     public static final String PLUGIN_DESCRIPTION =
             "MCP server for autonomous Java reverse engineering via LLM agents";
@@ -94,6 +101,10 @@ public class RecafMCPPlugin implements Plugin {
     private final StringPredicateProvider stringPredicateProvider;
     private final TransformationApplierService transformationApplierService;
     private final ScriptEngine scriptEngine;
+    private final ResourceImporterConfig resourceImporterConfig;
+    private final ResourceImporter resourceImporter;
+    private final InfoImporter infoImporter;
+    private ExecutorService inputLoader;
     private McpHttpServer server;
     private WorkerOperationCoordinator operationCoordinator;
     private WorkspaceOpenListener workspaceOpenListener;
@@ -113,7 +124,10 @@ public class RecafMCPPlugin implements Plugin {
                           SearchService searchService,
                           StringPredicateProvider stringPredicateProvider,
                           TransformationApplierService transformationApplierService,
-                          ScriptEngine scriptEngine) {
+                          ScriptEngine scriptEngine,
+                          ResourceImporterConfig resourceImporterConfig,
+                          ResourceImporter resourceImporter,
+                          InfoImporter infoImporter) {
         this.workspaceManager = workspaceManager;
         this.launchArguments = launchArguments;
         this.decompilerManager = decompilerManager;
@@ -129,6 +143,9 @@ public class RecafMCPPlugin implements Plugin {
         this.stringPredicateProvider = stringPredicateProvider;
         this.transformationApplierService = transformationApplierService;
         this.scriptEngine = scriptEngine;
+        this.resourceImporterConfig = resourceImporterConfig;
+        this.resourceImporter = resourceImporter;
+        this.infoImporter = infoImporter;
     }
 
     @Override
@@ -140,6 +157,11 @@ public class RecafMCPPlugin implements Plugin {
         }
 
         Path expectedInputPath = resolveExpectedInputPath();
+        if (expectedInputPath != null) {
+            // Large multidex APKs otherwise parse all DEX pools concurrently.
+            // This config belongs to the Bridge's isolated Worker data directory.
+            resourceImporterConfig.doParallelize().setValue(false);
+        }
         WorkerHealth health = new WorkerHealth(
                 workspaceManager::hasCurrentWorkspace,
                 expectedInputPath == null ? null : expectedInputPath.toString(),
@@ -239,6 +261,11 @@ public class RecafMCPPlugin implements Plugin {
             server = new McpHttpServer(requestedPort, token, requestHandler);
             server.start();
             logger.info("RECAF_MCP_READY host=127.0.0.1 port={}", server.getPort());
+            if (System.getProperty("recaf.mcp.input_path") != null && expectedInputPath != null
+                    && health.getRecafRuntime().compatible()) {
+                inputLoader = Executors.newSingleThreadExecutor();
+                inputLoader.submit(() -> loadInput(expectedInputPath, health));
+            }
         } catch (IOException | IllegalArgumentException ex) {
             logger.error("Failed to start the MCP Worker server", ex);
         }
@@ -246,6 +273,10 @@ public class RecafMCPPlugin implements Plugin {
 
     @Override
     public void onDisable() {
+        if (inputLoader != null) {
+            inputLoader.shutdownNow();
+            inputLoader = null;
+        }
         if (server != null) {
             server.stop();
             server = null;
@@ -261,11 +292,37 @@ public class RecafMCPPlugin implements Plugin {
     }
 
     private Path resolveExpectedInputPath() {
+        String managedInput = System.getProperty("recaf.mcp.input_path");
+        if (managedInput != null) return canonicalize(Path.of(managedInput));
         File input = launchArguments.getInput();
         if (input == null) {
             return null;
         }
         return canonicalize(input.toPath());
+    }
+
+    private void loadInput(Path input, WorkerHealth health) {
+        try {
+            var resource = new AndroidInputImporter(infoImporter).readIfAndroid(input);
+            var workspaceResource = resource == null ? resourceImporter.importResource(input) : resource;
+            if (Thread.currentThread().isInterrupted()) {
+                workspaceResource.close();
+                return;
+            }
+            var workspace = new BasicWorkspace(workspaceResource);
+            try {
+                workspaceManager.setCurrent(workspace);
+            } catch (RuntimeException | Error error) {
+                workspace.close();
+                throw error;
+            }
+        } catch (Exception | LinkageError | OutOfMemoryError error) {
+            logger.error("Failed to load MCP input", error);
+            Throwable root = error;
+            while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+            health.setLastError("Input import failed: " + error.getMessage() + "; "
+                    + root.getClass().getSimpleName() + ": " + root.getMessage());
+        }
     }
 
     private static void validateExpectedInput(Path expectedInputPath, WorkerHealth health) {

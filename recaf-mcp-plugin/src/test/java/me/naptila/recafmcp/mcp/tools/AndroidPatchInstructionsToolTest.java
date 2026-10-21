@@ -69,6 +69,36 @@ class AndroidPatchInstructionsToolTest {
     }
 
     @Test
+    void readsAndReassemblesMoveObject16WithHighRegisters() throws IOException {
+        var bundle = workspace.getPrimaryResource().getAndroidClassBundles().get("classes.dex");
+        var info = AndroidDexReader.readClass(AndroidFidelityFixture.moveObject16Dex(), "sample/WideRegisters");
+        bundle.put(info);
+        var request = new JsonObject();
+        request.addProperty("scope", "android");
+        request.addProperty("dex_name", "classes.dex");
+        request.addProperty("owner", info.getName());
+        request.addProperty("name", "copy");
+        request.addProperty("descriptor", "(Ljava/lang/Object;)Ljava/lang/Object;");
+        var readResult = readTool.execute(request);
+        assertFalse(readResult.get("isError").getAsBoolean(), readResult.toString());
+        var read = readResult.getAsJsonObject("structuredContent");
+        String assembly = read.get("assembly").getAsString();
+        // Dalvik Jasm selects the encoding width from physical register values.
+        assertTrue(assembly.contains("move-object v300 p0"), assembly);
+        request.addProperty("expected_assembly_sha256", read.get("assembly_sha256").getAsString());
+        request.addProperty("assembly", assembly);
+        var result = patchTool.execute(request);
+        assertFalse(result.get("isError").getAsBoolean(), result.toString());
+        var move = bundle.get(info.getName()).getBackingDefinition().getMethod("copy",
+                "(Ljava/lang/Object;)Ljava/lang/Object;").getCode().getInstructions().stream()
+                .filter(me.darknet.dex.tree.definitions.instructions.MoveObjectInstruction.class::isInstance)
+                .map(me.darknet.dex.tree.definitions.instructions.MoveObjectInstruction.class::cast)
+                .findFirst().orElseThrow();
+        assertEquals(300, move.to());
+        assertEquals(599, move.from());
+    }
+
+    @Test
     void editsDebugBearingMethodAndRebindsDebugRangesWithoutChangingOtherMethods() throws IOException {
         var bundle = workspace.getPrimaryResource().getAndroidClassBundles().get("classes.dex");
         for (var definition : AndroidDexReader.read(AndroidFidelityFixture.dex()).definitions()) {
@@ -88,7 +118,8 @@ class AndroidPatchInstructionsToolTest {
         assertFalse(assembly.contains("parameters:"));
         String other = info.getBackingDefinition().getMethod("unnamed", "(II)I").getCode().getDebugInfo().toString();
         request.addProperty("expected_assembly_sha256", read.get("assembly_sha256").getAsString());
-        request.addProperty("assembly", assembly.replace("17", "18").replace("return v1", "nop\n        return v1"));
+        request.addProperty("assembly", assembly.replace("17", "18")
+                .replaceFirst("(?m)^(\\h*)return ((?:v|p)\\d+)\\h*$", "$1nop\n$1return $2"));
         var result = patchTool.execute(request);
         assertFalse(result.get("isError").getAsBoolean(), result.toString());
         var updated = bundle.get("sample/Fidelity");

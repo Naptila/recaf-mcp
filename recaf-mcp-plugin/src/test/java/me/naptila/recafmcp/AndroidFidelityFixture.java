@@ -69,6 +69,19 @@ public final class AndroidFidelityFixture {
         return encode(List.of(caller("Lsample/OtherCaller;")));
     }
 
+    public static byte[] moveObject16Dex() throws IOException {
+        String owner = "Lsample/WideRegisters;";
+        var method = new ImmutableMethod(owner, "copy",
+                List.of(new ImmutableMethodParameter("Ljava/lang/Object;", Set.of(), "input")),
+                "Ljava/lang/Object;", 9, Set.of(), Set.of(), new ImmutableMethodImplementation(600, List.of(
+                        new ImmutableInstruction32x(Opcode.MOVE_OBJECT_16, 300, 599),
+                        new ImmutableInstruction22x(Opcode.MOVE_OBJECT_FROM16, 0, 300),
+                        new ImmutableInstruction11x(Opcode.RETURN_OBJECT, 0)), List.of(),
+                        List.of(new ImmutableLineNumber(0, 10), new ImmutableLineNumber(3, 11))));
+        return encode(List.of(new ImmutableClassDef(owner, 1, "Ljava/lang/Object;", List.of(), null,
+                Set.of(), List.of(), List.of(method))));
+    }
+
     public static byte[] arrayDex(String component, int width, List<Number> values) throws IOException {
         String owner = "Lsample/ArrayPayload;";
         var method = new ImmutableMethod(owner, "values", List.of(), "[" + component, 9,
@@ -80,6 +93,24 @@ public final class AndroidFidelityFixture {
                         new ImmutableInstruction11x(Opcode.RETURN_OBJECT, 0),
                         new ImmutableInstruction10x(Opcode.NOP),
                         new ImmutableArrayPayload(width, values)), List.of(), List.of()));
+        return encode(List.of(new ImmutableClassDef(owner, 1, "Ljava/lang/Object;", List.of(), null,
+                Set.of(), List.of(), List.of(method))));
+    }
+
+    public static byte[] paddingDebugDex() throws IOException {
+        String owner = "Lsample/PaddingDebug;";
+        var method = new ImmutableMethod(owner, "values", List.of(), "[I", 9, Set.of(), Set.of(),
+                new ImmutableMethodImplementation(1, List.of(
+                        new ImmutableInstruction11n(Opcode.CONST_4, 0, 2),
+                        new ImmutableInstruction22c(Opcode.NEW_ARRAY, 0, 0,
+                                new org.jf.dexlib2.immutable.reference.ImmutableTypeReference("[I")),
+                        new ImmutableInstruction31t(Opcode.FILL_ARRAY_DATA, 0, 5),
+                        new ImmutableInstruction11x(Opcode.RETURN_OBJECT, 0),
+                        new ImmutableInstruction10x(Opcode.NOP),
+                        new ImmutableArrayPayload(4, List.of(17, 18))), List.of(), List.of(
+                        new ImmutableLineNumber(0, 10), new ImmutableLineNumber(7, 11),
+                        new ImmutableLineNumber(8, 12), new ImmutableStartLocal(8, 0, "data", "[I", null),
+                        new ImmutableEndLocal(9, 0))));
         return encode(List.of(new ImmutableClassDef(owner, 1, "Ljava/lang/Object;", List.of(), null,
                 Set.of(), List.of(), List.of(method))));
     }
@@ -115,6 +146,13 @@ public final class AndroidFidelityFixture {
         Files.createDirectories(directory);
         byte[] first = dex();
         Files.write(directory.resolve("fidelity.dex"), first);
+        byte[] wideRegisters = moveObject16Dex();
+        Files.write(directory.resolve("move-object-16.dex"), wideRegisters);
+        try (var zip = new ZipOutputStream(Files.newOutputStream(directory.resolve("move-object-16.apk")))) {
+            zip.putNextEntry(new ZipEntry("classes.dex"));
+            zip.write(wideRegisters);
+            zip.closeEntry();
+        }
         try (var zip = new ZipOutputStream(Files.newOutputStream(directory.resolve("fidelity.apk")))) {
             zip.putNextEntry(new ZipEntry("classes.dex"));
             zip.write(first);

@@ -102,6 +102,22 @@ class RecafRuntimeInfoTest {
     }
 
     @Test
+    void missingAndroidLoweringPolicyIsReportedBeforeWorkspaceReadiness() {
+        ClassLoader loader = new ClassLoader(getClass().getClassLoader()) {
+            @Override
+            protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                if (name.equals("me.darknet.dex.convert.ir.lowering.JvmLoweringPolicy")) {
+                    throw new ClassNotFoundException(name);
+                }
+                return super.loadClass(name, resolve);
+            }
+        };
+        RecafRuntimeInfo runtime = RecafRuntimeInfo.detect(loader);
+        assertFalse(runtime.compatible());
+        assertTrue(runtime.errors().stream().anyMatch(error -> error.contains("DEX fidelity")));
+    }
+
+    @Test
     void scriptHelpReportsRuntimeAndCompilationSeparately() throws ReflectiveOperationException {
         JsonObject result = new GetRecafScriptHelpTool().execute(new JsonObject())
                 .getAsJsonObject("structuredContent");

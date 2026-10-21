@@ -18,7 +18,7 @@ Python 3.11 or newer and `uv` are required. Install the cross-platform wheel
 directly from GitHub without a checkout or local build:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf_mcp_bridge-1.1.0-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf_mcp_bridge-1.1.1-py3-none-any.whl
 ```
 
 To install from a local source checkout instead:
@@ -65,13 +65,34 @@ RECAF_JAR=/absolute/path/to/recaf.jar
 RECAF_PLUGIN_JAR=/optional/exact/recaf-mcp-plugin.jar
 RECAF_PLUGIN_DIR=/optional/plugin/discovery/directory
 RECAF_MAX_SESSIONS=2
-RECAF_WORKER_MAX_HEAP_MB=1024
+# Optional fixed heap limit; omit to share 60% of JVM-visible RAM across slots.
+RECAF_WORKER_MAX_HEAP_MB=4096
 RECAF_IDLE_TTL_SEC=600
 RECAF_RESPONSE_PROFILE=compact
 RECAF_LAUNCH_TIMEOUT_SEC=60
 RECAF_SESSION_ROOT=/optional/owner-only/session/directory
 RECAF_RECOVERY_DIR=/optional/owner-only/recovery/directory
 ```
+
+The Bridge passes the input through `-Drecaf.mcp.input_path` so the Worker can
+import APK/DEX directly instead of importing and repairing the same DEX twice.
+APK resources are indexed with up to four readers and loaded fully on demand;
+DEX parsing is bounded to two readers, or one below a 1 GiB heap. Every original
+DEX and class set is checked before readiness. Generic JAR imports stay serial.
+Embedded archives in APKs remain file entries rather than expanded workspaces.
+The original input must remain available and unchanged until session close.
+APK export streams original compressed resources and re-encodes current DEX;
+ZIP64 output uses streaming recompression. Full resource reads are capped at
+one third of the Worker heap and Java's byte-array limit. Script-created embedded
+archives must be file entries. Exported APKs need alignment and signing.
+JVM out-of-memory failures exit immediately with a memory-specific open error;
+readiness timeouts do not restart the same import. `recaf_list` includes
+`pending_sessions`, `occupied_slots`, `max_sessions`, and `available_slots`.
+Cancelling an open request terminates its Worker and releases capacity and paths.
+Workspace saves use a 310-second HTTP deadline to allow larger APK exports.
+Terminal Recaf workspace import and plugin initialization failures stop the
+Worker and return the cause immediately, including DEX `Unknown opcode` errors,
+without waiting for the readiness timeout.
 
 Without `RECAF_RECOVERY_DIR`, the Bridge uses
 `$XDG_STATE_HOME/recaf-mcp/recovery`, falling back to
@@ -412,8 +433,8 @@ discoverable JVM decompiler enum is intentional and reported as
 Android bytecode analysis operates directly on Recaf's DEX tree. Source patching
 and JVM transformations remain unsupported for Android. Symbol renames and mappings
 can be saved to APK/DEX. APK export rebuilds all DEX bundles, preserves archive
-resources, removes obsolete signatures and aligns ZIP entries. The output is unsigned
-and must be signed separately for installation. Default close saves the workspace.
+resources and removes obsolete signatures. Align and sign the unsigned output
+before installation. Default close saves the workspace.
 
 `rename_symbol(database, kind, name, new_name, owner?, descriptor?,
 scope="jvm", dex_name?)` renames one exact primary-resource JVM or Android

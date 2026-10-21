@@ -14,6 +14,7 @@ from config import BridgeConfig
 SCRIPT = '''\
 import me.darknet.dex.tree.definitions.instructions.ConstInstruction;
 import me.darknet.dex.tree.definitions.instructions.NopInstruction;
+import me.darknet.dex.tree.definitions.code.Code;
 import software.coley.recaf.info.builder.AndroidClassInfoBuilder;
 
 int classes = 0;
@@ -23,19 +24,29 @@ for (var bundle : workspace.getPrimaryResource().getAndroidClassBundles().values
         boolean changed = false;
         for (var method : info.getBackingDefinition().getMethods().values()) {
             if (method.getCode() == null) continue;
-            var instructions = method.getCode().getInstructions();
+            var code = method.getCode();
+            var instructions = new java.util.ArrayList<>(code.getInstructions());
+            boolean methodChanged = false;
             if (info.getName().equals("sample/Fidelity") && method.getName().equals("mix")) {
                 for (int index = 0; index < instructions.size(); index++) {
                     if (instructions.get(index) instanceof ConstInstruction c && c.value() == 17) {
                         instructions.set(index, new ConstInstruction(c.opcode(), c.register(), 18));
                         methods++;
-                        changed = true;
+                        methodChanged = true;
                     }
                 }
             } else if (method.getName().equals("evaluate")
                     && (info.getName().equals("sample/Caller") || info.getName().equals("sample/OtherCaller"))) {
                 instructions.add(0, new NopInstruction());
                 methods++;
+                methodChanged = true;
+            }
+            if (methodChanged) {
+                var updated = new Code(code.getIn(), code.getOut(), code.getRegisters());
+                updated.addInstructions(instructions);
+                code.tryCatch().forEach(updated::addTryCatch);
+                if (code.getDebugInfo() != null) updated.setDebugInfo(code.getDebugInfo());
+                method.setCode(updated);
                 changed = true;
             }
         }

@@ -95,7 +95,7 @@ class SchemaWorkerDiscovery:
                         {**os.environ, "RECAF_MCP_TOKEN": token},
                         log_path,
                     )
-                    health = await self._wait_until_ready(process, port, token)
+                    health = await self._wait_until_ready(process, port, token, log_path)
                     result = await self._rpc_client.request(
                         port,
                         token,
@@ -112,6 +112,10 @@ class SchemaWorkerDiscovery:
                         pass
                     return discovered
                 except (WorkerPortCollision, WorkerNotListening) as error:
+                    if WorkerLauncher._has_memory_failure(log_path):
+                        raise WorkerLauncher._diagnostic_error(
+                            str(error), log_path, token,
+                        ) from error
                     retry = True
                     final_error = error
                 except OSError as error:
@@ -124,7 +128,8 @@ class SchemaWorkerDiscovery:
                     ) from error
                 finally:
                     if process is not None:
-                        await self._process_terminator(process)
+                        with anyio.CancelScope(shield=True):
+                            await self._process_terminator(process)
                 if not retry:
                     break
             raise WorkerLaunchError(
@@ -141,7 +146,7 @@ class SchemaWorkerDiscovery:
     ) -> list[str]:
         return [
             self._config.java_command,
-            f"-Xmx{self._config.worker_max_heap_mb}m",
+            *self._config.worker_jvm_options,
             f"-Drecaf.mcp.port={port}",
             "-jar",
             str(self._config.recaf_jar),
@@ -158,11 +163,18 @@ class SchemaWorkerDiscovery:
         process: Process,
         port: int,
         token: str,
+        log_path: Path,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + self._config.launch_timeout_sec
         while time.monotonic() < deadline:
             if process.returncode is not None:
                 raise WorkerLaunchError("schema-only Worker exited before readiness")
+            failure = WorkerLauncher._startup_failure(log_path)
+            if failure is not None:
+                raise WorkerLaunchError(
+                    "schema-only Worker startup failed: "
+                    + failure.replace(token, "<redacted>")
+                )
             try:
                 health = await self._health_probe.probe(port, token)
             except WorkerNotListening:
@@ -185,7 +197,7 @@ class SchemaWorkerDiscovery:
             ):
                 return health
             await self._sleep(self._config.readiness_poll_sec)
-        raise WorkerPortCollision("schema-only Worker readiness timed out")
+        raise WorkerLaunchError("schema-only Worker readiness timed out")
 
     @staticmethod
     def _validate_catalog(

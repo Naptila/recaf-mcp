@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -111,11 +112,7 @@ class HttpHealthProbe:
                     headers={"Authorization": f"Bearer {token}"},
                     json=request,
                 )
-        except (
-            httpx.ConnectError,
-            httpx.ConnectTimeout,
-            httpx.ReadTimeout,
-        ) as error:
+        except httpx.TransportError as error:
             raise WorkerNotListening("Worker endpoint is not listening") from error
         if response.status_code in {401, 403, 404}:
             raise WorkerPortCollision("allocated port is owned by another endpoint")
@@ -297,6 +294,7 @@ class WorkerLauncher:
                         port,
                         token,
                         paths.input_path,
+                        log_path,
                     )
                     archive_export_supported = health[
                         "workspace_archive_export_supported"
@@ -346,6 +344,8 @@ class WorkerLauncher:
                     activated = True
                     return session
                 except WorkerPortCollision as error:
+                    if self._has_memory_failure(log_path):
+                        raise self._diagnostic_error(str(error), log_path, token) from error
                     final_error = error
                     final_log_path = log_path
                     final_token = token
@@ -363,7 +363,8 @@ class WorkerLauncher:
                     ) from error
                 finally:
                     if process is not None and not activated:
-                        await self._process_terminator(process)
+                        with anyio.CancelScope(shield=True):
+                            await self._process_terminator(process)
                 if attempt < self._config.launch_attempts:
                     continue
             if final_log_path is None or final_token is None:
@@ -376,24 +377,26 @@ class WorkerLauncher:
                 final_token,
             ) from final_error
         except BaseException:
-            await self._sessions.abandon(sid)
-            if paths is not None:
-                await self._reservations.release(sid)
-            shutil.rmtree(session_root, ignore_errors=True)
+            with anyio.CancelScope(shield=True):
+                await self._sessions.abandon(sid)
+                if paths is not None:
+                    await self._reservations.release(sid)
+                shutil.rmtree(session_root, ignore_errors=True)
             raise
 
     async def abort(self, sid: str) -> None:
         """Force-stop an owned session and release all launch-owned resources."""
-        session = await self._sessions.get(sid)
-        if session is None:
-            await self._reservations.release(sid)
-            return
-        try:
-            await self._process_terminator(session.process)
-        finally:
-            await self._sessions.remove(sid)
-            await self._reservations.release(sid)
-            shutil.rmtree(session.session_dir, ignore_errors=True)
+        with anyio.CancelScope(shield=True):
+            session = await self._sessions.get(sid)
+            if session is None:
+                await self._reservations.release(sid)
+                return
+            try:
+                await self._process_terminator(session.process)
+            finally:
+                await self._sessions.remove(sid)
+                await self._reservations.release(sid)
+                shutil.rmtree(session.session_dir, ignore_errors=True)
 
     def _command(
         self,
@@ -404,8 +407,9 @@ class WorkerLauncher:
     ) -> list[str]:
         return [
             self._config.java_command,
-            f"-Xmx{self._config.worker_max_heap_mb}m",
+            *self._config.worker_jvm_options,
             f"-Drecaf.mcp.port={port}",
+            f"-Drecaf.mcp.input_path={input_path}",
             "-jar",
             str(self._config.recaf_jar),
             "-d",
@@ -414,8 +418,6 @@ class WorkerLauncher:
             str(plugins_dir),
             "--headless",
             "--idle",
-            "-i",
-            str(input_path),
         ]
 
     async def _wait_until_ready(
@@ -424,11 +426,19 @@ class WorkerLauncher:
         port: int,
         token: str,
         expected_input: Path,
+        log_path: Path,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + self._config.launch_timeout_sec
         while time.monotonic() < deadline:
             if process.returncode is not None:
-                raise WorkerLaunchError("Worker exited before readiness")
+                raise WorkerLaunchError(
+                    f"Worker exited before readiness (exit code {process.returncode})"
+                )
+            failure = self._startup_failure(log_path)
+            if failure is not None:
+                raise WorkerLaunchError(
+                    "Worker startup failed: " + failure.replace(token, "<redacted>")
+                )
             try:
                 health = await self._health_probe.probe(port, token)
             except WorkerNotListening:
@@ -448,7 +458,10 @@ class WorkerLauncher:
             ):
                 return health
             await self._sleep(self._config.readiness_poll_sec)
-        raise WorkerPortCollision("Worker readiness timed out on the allocated port")
+        raise WorkerLaunchError(
+            f"Worker readiness timed out after {self._config.launch_timeout_sec:g}s; "
+            "increase RECAF_LAUNCH_TIMEOUT_SEC for large inputs"
+        )
 
     def _validate_health_identity(
         self,
@@ -486,14 +499,71 @@ class WorkerLauncher:
             raise WorkerLaunchError("Worker output format is missing or invalid")
 
     @staticmethod
+    def _startup_failure(log_path: Path) -> str | None:
+        """Read Recaf's terminal bootstrap error even when it stays alive in idle mode."""
+        marker = None
+        cause = None
+        fatal_messages = (
+            "Error handling loading of launch workspace content.",
+            "Failed to initialize plugins",
+        )
+        try:
+            with log_path.open("rb") as log_file:
+                while raw_line := log_file.readline(4096):
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if marker is not None and re.match(r"^\d\d:\d\d:\d\d\.\d+ \[", line):
+                        break
+                    if "[LaunchBootstrap/" in line and "] ERROR" in line:
+                        marker = next((value for value in fatal_messages if value in line), None)
+                    elif marker is not None and (
+                        line.startswith("Caused by: ")
+                        or re.match(r"^(?:[\w$]+\.)*[\w$]*(?:Exception|Error)(?::|$)", line)
+                    ):
+                        cause = line.removeprefix("Caused by: ")
+        except OSError:
+            return None
+        if marker is None:
+            return None
+        reason = f"{marker} {cause or ''}".strip()
+        return "".join(character if ord(character) >= 32 else "?" for character in reason)[:600]
+
+    @staticmethod
+    def _has_memory_failure(log_path: Path) -> bool:
+        """Find an OOM even before a long thread dump, using bounded memory."""
+        try:
+            with log_path.open("rb") as log_file:
+                previous = b""
+                while chunk := log_file.read(65536):
+                    if b"OutOfMemoryError" in previous + chunk:
+                        return True
+                    previous = chunk[-32:]
+        except OSError:
+            pass
+        return False
+
+    @staticmethod
     def _diagnostic_error(
         message: str,
         log_path: Path,
         token: str,
     ) -> WorkerLaunchError:
         """Attach a bounded, control-character-safe, token-free log tail."""
+        failure = WorkerLauncher._startup_failure(log_path)
+        if failure is not None:
+            failure = failure.replace(token, "<redacted>")
+            if failure not in message:
+                message = "Worker startup failed: " + failure + "\n" + message
+        if WorkerLauncher._has_memory_failure(log_path):
+            message = (
+                "Worker exhausted JVM memory (OutOfMemoryError). "
+                "Increase RECAF_WORKER_MAX_HEAP_MB or reduce RECAF_MAX_SESSIONS. "
+                + message
+            )
         try:
-            data = log_path.read_bytes()[-16384:]
+            with log_path.open("rb") as log_file:
+                log_file.seek(0, os.SEEK_END)
+                log_file.seek(max(0, log_file.tell() - 16384))
+                data = log_file.read(16384)
         except OSError:
             return WorkerLaunchError(message)
         decoded = data.decode("utf-8", errors="replace").replace(token, "<redacted>")

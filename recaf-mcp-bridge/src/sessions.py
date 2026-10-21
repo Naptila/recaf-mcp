@@ -54,6 +54,19 @@ class Session:
     output_format: str | None = "jar"
 
 
+@dataclass(frozen=True, slots=True)
+class SessionSnapshot:
+    """One atomic view of active sessions and startup capacity reservations."""
+
+    sessions: tuple[Session, ...]
+    pending_ids: tuple[str, ...]
+    max_sessions: int
+
+    @property
+    def occupied_slots(self) -> int:
+        return len(self.sessions) + len(self.pending_ids)
+
+
 class SessionManager:
     """Own active sessions and count pending launches against the same cap."""
 
@@ -169,6 +182,15 @@ class SessionManager:
     async def snapshot(self) -> list[Session]:
         async with self._lock:
             return list(self._sessions.values())
+
+    async def snapshot_state(self) -> SessionSnapshot:
+        """Include starting Workers so a full capacity cap is observable."""
+        async with self._lock:
+            return SessionSnapshot(
+                tuple(self._sessions.values()),
+                tuple(sorted(self._pending)),
+                self._max_sessions,
+            )
 
     async def slot_count(self) -> int:
         async with self._lock:

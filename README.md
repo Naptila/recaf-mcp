@@ -36,8 +36,8 @@ dynamic tool-list support. The complete tool catalog is shown below.
   emits Java 22-compatible bytecode; `patch_class` requires a JDK with `javac`,
   not a JRE.
 - A Recaf 4 generic executable JAR, which bundles Recaf's runtime dependencies.
-  Version 1.1.0 targets [Recaf build `17216bd3`](https://github.com/Col-E/Recaf/commit/17216bd3b76bc6ef36c4198262b5318e2936fbb7)
-  (2026-10-14) and its assembler/DEX APIs. Update older Recaf snapshots before
+  Version 1.1.1 targets [Recaf build `9090128`](https://github.com/Col-E/Recaf/commit/909012806d893a61f68e2a66e174618c50840343)
+  (2026-10-18) and its assembler/DEX APIs. Update older Recaf snapshots before
   upgrading the plugin.
 - Python 3.11 or newer.
 - [`uv`](https://docs.astral.sh/uv/) for the locked Bridge environment.
@@ -55,7 +55,7 @@ Recaf JAR; it rejects Workers whose revision differs from catalog discovery.
 ### Install from a Release (recommended)
 
 No source checkout or local build is required. Download the
-[`recaf-mcp-plugin-1.1.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf-mcp-plugin-1.1.0.jar)
+[`recaf-mcp-plugin-1.1.1.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf-mcp-plugin-1.1.1.jar)
 asset from the [latest GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
 and copy it into Recaf's plugin directory:
 
@@ -68,7 +68,7 @@ and copy it into Recaf's plugin directory:
 Install the cross-platform Bridge wheel directly from the same Release:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf_mcp_bridge-1.1.0-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf_mcp_bridge-1.1.1-py3-none-any.whl
 ```
 
 This installs the `recaf-mcp-bridge` command without publishing the project to
@@ -77,7 +77,7 @@ PyPI.
 When upgrading, back up the old plugin JAR outside Recaf's plugin directory and
 keep exactly one `recaf-mcp-plugin*.jar` there. Reinstall the Bridge wheel with
 `uv tool install --force` followed by the URL above, then restart the MCP
-connection and reopen workspaces so both components use 1.1.0.
+connection and reopen workspaces so both components use 1.1.1.
 
 ### Build from source
 
@@ -87,7 +87,7 @@ To build the plugin and install the Bridge from a checkout instead:
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.1.0.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.1.1.jar ~/.config/Recaf/plugins/
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```
@@ -137,6 +137,11 @@ catalog discovery and stdio routing work. Allow 120 seconds for first startup,
 `export_sources`. If the client cannot find the command, use the absolute path
 reported by `command -v recaf-mcp-bridge`.
 
+`recaf_list` also returns `pending_sessions` with `state="starting"`,
+`occupied_slots`, `max_sessions`, and `available_slots`. A starting Worker
+uses a slot before it appears in `sessions`; cancelling its open request stops
+the Worker and releases that slot and its reserved paths.
+
 ## First analysis session
 
 | Step | Call | Result |
@@ -168,12 +173,54 @@ token is present, so the installed plugin remains dormant.
 | `RECAF_PLUGIN_DIR` | Recaf's standard directory | Optional plugin discovery directory |
 | `RECAF_JAVA_COMMAND` | `java` | JDK executable used for Workers |
 | `RECAF_MAX_SESSIONS` | `2` | Concurrent pending/ready Worker cap, 1–32 |
-| `RECAF_WORKER_MAX_HEAP_MB` | `1024` | Per-Worker maximum heap, at least 128 MiB |
+| `RECAF_WORKER_MAX_HEAP_MB` | automatic | Optional per-Worker heap override, 128–65536 MiB |
 | `RECAF_IDLE_TTL_SEC` | `600` | Idle cleanup time: autosave supported JAR/APK/DEX inputs; `0` disables it |
 | `RECAF_RESPONSE_PROFILE` | `compact` | `compact` avoids duplicate JSON text; `legacy` restores it |
 | `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | Worker launch readiness deadline |
 | `RECAF_SESSION_ROOT` | system temp | Owner-only live session directory |
 | `RECAF_RECOVERY_DIR` | XDG state | Owner-only failed-shutdown recovery registry |
+
+Without a heap override, the Bridge sets each JVM's `-XX:MaxRAMPercentage`
+to 60 divided by `RECAF_MAX_SESSIONS`. With two slots, each Worker can use up to
+30% of JVM-visible RAM; native memory and other processes also need RAM. Set
+`RECAF_WORKER_MAX_HEAP_MB=4096` for an explicit 4 GiB limit, or increase it
+when a large APK needs more memory. Managed APK imports index resource headers
+with up to four readers and parse at most two DEX files concurrently (one with
+a heap below 1 GiB). Each DEX is read once with fidelity repairs, and its class
+set is checked before readiness. Generic JAR imports remain serial.
+APK resources stay in the original ZIP until explicitly read; file listings use
+header previews and directory sizes. Unread file kinds and charsets are inferred
+from the preview; explicit reads classify the complete content.
+Embedded ZIP/JAR/APK entries remain files,
+without recursive workspace expansion. Keep the original input available and
+unchanged until closing the session. Full resource reads are bounded by the
+smaller of one third of the Worker heap and Java's byte-array limit.
+Import repairs become the clean baseline without retaining duplicate undo trees.
+APK saves encode the current DEX trees and stream unchanged compressed resources
+without loading the whole APK into memory. ZIP64 output uses streaming
+recompression. The exporter checks the complete resource inventory; embedded
+workspace resources added by scripts must instead be supplied as file entries.
+Saved APKs require alignment and signing before installation.
+Dalvik Jasm can print parameter aliases such as `p0` and the receiver `this`;
+returned assembly can be patched directly with those aliases. Native DEX script
+APIs continue to use physical register numbers.
+DEX scripts must copy the read-only `Code.getInstructions()` view and install a
+replacement `Code`; `get_recaf_script_help(topic="workspace")` includes the
+updated complete example with debug and exception metadata retained.
+Workers exit on JVM out-of-memory errors; the open error identifies memory
+exhaustion and does not retry the same import as a port collision. For slow
+imports, set `RECAF_LAUNCH_TIMEOUT_SEC=120`; readiness timeouts also fail without
+restarting the import.
+If Recaf reports a terminal workspace import or plugin initialization failure,
+the Bridge stops the Worker and returns the cause immediately, including DEX
+`Unknown opcode` errors, instead of waiting for the readiness deadline.
+
+Android saves and per-class DEX encoding also apply a scoped compatibility fix
+for the pinned writer's missing `move-object/16` opcode. Its 16-bit register
+operands and instruction width are preserved; the opcode registry is restored
+after encoding, including failures.
+Workspace saves use a 310-second HTTP deadline, including save-before-close
+and autosave, so larger exports can finish after the general 30-second RPC limit.
 
 Bearer tokens and loopback ports are generated per Worker. Do not place tokens
 in client configuration or command arguments.
@@ -193,7 +240,7 @@ by `recaf_open`.
 | Tool | Purpose | Key behavior |
 | --- | --- | --- |
 | `recaf_open` | Open a JAR, APK, or DEX | Returns `database`, save capability, and a nullable autosave path |
-| `recaf_list` | List open sessions | Safe installation smoke test |
+| `recaf_list` | List open/starting sessions and capacity | Safe installation smoke test |
 | `set_idle_ttl` | Change idle timeout | `0` disables automatic idle cleanup |
 | `recaf_save` | Export JAR/APK/DEX | Atomic output in the original format; APK output is unsigned |
 | `recaf_close` | Close a session | Omitted `save` saves JAR/APK/DEX; `save=false` discards |
@@ -350,7 +397,7 @@ Run it against an explicit generic JAR from the Bridge directory:
 ```bash
 uv run --frozen python ../scripts/test_real_worker.py \
   --recaf-jar /absolute/path/to/recaf.jar \
-  --plugin-jar ../recaf-mcp-plugin/build/libs/recaf-mcp-plugin-1.1.0.jar
+  --plugin-jar ../recaf-mcp-plugin/build/libs/recaf-mcp-plugin-1.1.1.jar
 ```
 
 The runner discovers Worker identity automatically, copies its input to a

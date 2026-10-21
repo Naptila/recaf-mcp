@@ -98,12 +98,22 @@ class BridgeConfig:
     recovery_dir: Path | None = None
     java_command: str = "java"
     max_sessions: int = 2
-    worker_max_heap_mb: int = 1024
+    worker_max_heap_mb: int | None = None
     default_idle_ttl_sec: int = 600
     response_profile: str = "compact"
     launch_timeout_sec: float = 60.0
     launch_attempts: int = 3
     readiness_poll_sec: float = 0.2
+
+    @property
+    def worker_jvm_options(self) -> list[str]:
+        """Share 60% of JVM-visible RAM across Worker slots unless overridden."""
+        heap_option = (
+            f"-Xmx{self.worker_max_heap_mb}m"
+            if self.worker_max_heap_mb is not None
+            else f"-XX:MaxRAMPercentage={60 / self.max_sessions:g}"
+        )
+        return [heap_option, "-XX:+ExitOnOutOfMemoryError"]
 
     @property
     def effective_plugin_jar(self) -> Path:
@@ -159,7 +169,10 @@ class BridgeConfig:
             raise ValueError("RECAF_JAVA_COMMAND must not be empty")
         if not 1 <= self.max_sessions <= 32:
             raise ValueError("max_sessions must be between 1 and 32")
-        if not 128 <= self.worker_max_heap_mb <= 65536:
+        if (
+            self.worker_max_heap_mb is not None
+            and not 128 <= self.worker_max_heap_mb <= 65536
+        ):
             raise ValueError("worker_max_heap_mb must be between 128 and 65536")
         if not 0 <= self.default_idle_ttl_sec <= 604800:
             raise ValueError("default_idle_ttl_sec must be between 0 and 604800")
@@ -218,8 +231,11 @@ class BridgeConfig:
             max_sessions=_bounded_int(
                 env, "RECAF_MAX_SESSIONS", 2, minimum=1, maximum=32
             ),
-            worker_max_heap_mb=_bounded_int(
-                env, "RECAF_WORKER_MAX_HEAP_MB", 1024, minimum=128, maximum=65536
+            worker_max_heap_mb=(
+                _bounded_int(
+                    env, "RECAF_WORKER_MAX_HEAP_MB", 1024, minimum=128, maximum=65536
+                )
+                if "RECAF_WORKER_MAX_HEAP_MB" in env else None
             ),
             default_idle_ttl_sec=_bounded_int(
                 env, "RECAF_IDLE_TTL_SEC", 600, minimum=0, maximum=604800

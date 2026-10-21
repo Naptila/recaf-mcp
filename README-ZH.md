@@ -34,8 +34,8 @@ Recaf，也无需发布 Python 包。
 - JDK 25，用于仓库内置的 Gradle 工具链和 Worker 进程。插件生成兼容
   Java 22 的字节码；`patch_class` 需要包含 `javac` 的 JDK，不能使用 JRE。
 - Recaf 4 通用可执行 JAR，其中包含 Recaf 的运行时依赖。
-  1.1.0 适配 [Recaf 构建 `17216bd3`](https://github.com/Col-E/Recaf/commit/17216bd3b76bc6ef36c4198262b5318e2936fbb7)
-  （2026-10-14）及其汇编器/DEX API。升级插件前，请先更新旧版 Recaf 快照。
+  1.1.1 适配 [Recaf 构建 `9090128`](https://github.com/Col-E/Recaf/commit/909012806d893a61f68e2a66e174618c50840343)
+  （2026-10-18）及其汇编器/DEX API。升级插件前，请先更新旧版 Recaf 快照。
 - Python 3.11 或更高版本。
 - [`uv`](https://docs.astral.sh/uv/)，用于桥接器的锁定依赖环境。
 
@@ -53,7 +53,7 @@ Worker 启动时会检查所需的 Jasm 和 DEX API，在会话就绪前拒绝�
 无需检出源码或在本地构建项目。从
 [最新 GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
 下载
-[`recaf-mcp-plugin-1.1.0.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf-mcp-plugin-1.1.0.jar)，
+[`recaf-mcp-plugin-1.1.1.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf-mcp-plugin-1.1.1.jar)，
 并将其复制到 Recaf 插件目录：
 
 | 平台 | Recaf 插件目录 |
@@ -65,14 +65,14 @@ Worker 启动时会检查所需的 Jasm 和 DEX API，在会话就绪前拒绝�
 直接从同一个 Release 安装跨平台 Bridge wheel：
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/recaf_mcp_bridge-1.1.0-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf_mcp_bridge-1.1.1-py3-none-any.whl
 ```
 
 该命令会安装 `recaf-mcp-bridge`，项目本身无需发布到 PyPI。
 
 升级时，请将旧插件 JAR 备份到 Recaf 插件目录之外，目录内仅保留一个
 `recaf-mcp-plugin*.jar`。通过 `uv tool install --force` 加上面的 URL
-重新安装 Bridge wheel，再重启 MCP 连接并重新打开工作区，使两部分均使用 1.1.0。
+重新安装 Bridge wheel，再重启 MCP 连接并重新打开工作区，使两部分均使用 1.1.1。
 
 ### 从源码构建
 
@@ -82,7 +82,7 @@ uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.0/re
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.1.0.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.1.1.jar ~/.config/Recaf/plugins/
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```
@@ -158,12 +158,49 @@ MCP 客户端通常只需设置 `RECAF_JAR`。桥接器会在 Recaf 的标准插
 | `RECAF_PLUGIN_DIR` | Recaf 标准目录 | 可选：指定插件发现目录 |
 | `RECAF_JAVA_COMMAND` | `java` | Worker 使用的 JDK 可执行文件 |
 | `RECAF_MAX_SESSIONS` | `2` | 并发等待/就绪 Worker 上限，取值 1–32 |
-| `RECAF_WORKER_MAX_HEAP_MB` | `1024` | 每个 Worker 的最大堆，至少 128 MiB |
+| `RECAF_WORKER_MAX_HEAP_MB` | 自动 | 可选的每 Worker 堆上限，128–65536 MiB |
 | `RECAF_IDLE_TTL_SEC` | `600` | 空闲清理时间：自动保存支持的 JAR/APK/DEX 输入；`0` 表示禁用 |
 | `RECAF_RESPONSE_PROFILE` | `compact` | `compact` 避免重复 JSON 文本；`legacy` 恢复重复文本 |
 | `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | 等待 Worker 启动就绪的超时时间 |
 | `RECAF_SESSION_ROOT` | 系统临时目录 | 仅所有者可访问的实时会话目录 |
 | `RECAF_RECOVERY_DIR` | XDG state | 仅所有者可访问的异常关闭恢复记录 |
+
+未指定堆上限时，桥接器将每个 JVM 的 `-XX:MaxRAMPercentage` 设为
+60 除以 `RECAF_MAX_SESSIONS` 的数值。默认两个名额时，每个 Worker
+最多使用 JVM 可见内存的 30%；原生内存和其他进程也需要内存。可以设置
+`RECAF_WORKER_MAX_HEAP_MB=4096` 明确限制为 4 GiB；大 APK 内存不足时可继续调高。
+托管 APK 导入最多用四个读取线程扫描资源头，最多同时解析两个 DEX（堆小于
+1 GiB 时只解析一个）。每个 DEX 仅做一次保真读取，并在报告就绪前核对类集合。
+普通 JAR 仍采用串行导入。
+APK 资源保留在原 ZIP 中，显式读取时才完整加载；文件列表使用文件头预览及
+目录记录的大小；未读取文件的类型和字符集由预览推断，显式读取后按完整内容判断。
+内嵌 ZIP/JAR/APK 作为文件保留，不递归展开为工作区。
+会话关闭前应保持原始输入可用且不变。单个资源完整读取的上限为 Worker 堆的
+三分之一与 Java 字节数组上限中的较小值。
+导入修复作为干净的初始状态，不在撤销历史中保留重复的旧 DEX 树。
+APK 保存时编码当前 DEX 树，并流式复制未修改资源的压缩数据，无需将整个 APK
+加载进内存；ZIP64 输出采用流式解压再压缩。导出会核对完整资源清单；脚本新增
+的内嵌归档应放入文件集合，不支持新增内嵌工作区资源。输出安装前需对齐并签名。
+Dalvik Jasm 可能显示 `p0` 等参数别名和接收者 `this`，返回的汇编可以直接使用
+这些别名进行补丁；原生 DEX 脚本 API 仍使用物理寄存器编号。
+DEX 脚本需复制只读的 `Code.getInstructions()`，修改副本后安装新的 `Code`。
+`get_recaf_script_help(topic="workspace")` 已提供保留调试及异常处理元数据的完整示例。
+JVM 内存耗尽时 Worker 会退出，打开错误会明确指出内存不足，不再按端口冲突
+重复导入。导入较慢时可以设置 `RECAF_LAUNCH_TIMEOUT_SEC=120`；就绪超时也会直接
+失败并清理，不会重新启动导入。
+Recaf 报告工作区导入或插件初始化失败时，桥接器会停止 Worker 并立即返回原因，
+包括 DEX 的 `Unknown opcode` 错误，无需等待就绪超时。
+
+Android 保存及单类 DEX 编码还针对当前固定版本写入器遗漏的 `move-object/16`
+操作码应用临时兼容修复，保留其 16 位寄存器参数及指令宽度；编码结束或失败后
+都会恢复原来的操作码注册表。
+工作区保存采用 310 秒的 HTTP 超时，包括关闭前保存和自动保存，让大型导出可以
+超过普通 RPC 的 30 秒期限。
+
+`recaf_list` 还返回状态为 `starting` 的 `pending_sessions`，以及
+`occupied_slots`、`max_sessions` 和 `available_slots`。正在启动的 Worker
+尚未出现在 `sessions` 中，但已占用名额；取消打开请求会停止 Worker，释放
+名额及预留路径。
 
 每个 Worker 的 Bearer 令牌和回环端口都会独立生成。不要将令牌放入客户端配置或
 命令行参数中。
@@ -181,7 +218,7 @@ MCP 客户端通常只需设置 `RECAF_JAR`。桥接器会在 Recaf 的标准插
 | 工具 | 用途 | 关键行为 |
 | --- | --- | --- |
 | `recaf_open` | 打开 JAR、APK 或 DEX | 返回 `database`、保存能力和可为空的自动保存路径 |
-| `recaf_list` | 列出已打开的会话 | 可用于安全检查安装是否正常 |
+| `recaf_list` | 列出已打开、正在启动的会话及容量 | 可用于安全检查安装是否正常 |
 | `set_idle_ttl` | 修改空闲超时 | `0` 表示禁用自动空闲清理 |
 | `recaf_save` | 导出 JAR/APK/DEX | 按原格式原子写入；APK 输出未签名 |
 | `recaf_close` | 关闭会话 | 省略 `save` 时保存 JAR/APK/DEX；`save=false` 丢弃 |
@@ -330,7 +367,7 @@ uv run pytest -q
 ```bash
 uv run --frozen python ../scripts/test_real_worker.py \
   --recaf-jar /absolute/path/to/recaf.jar \
-  --plugin-jar ../recaf-mcp-plugin/build/libs/recaf-mcp-plugin-1.1.0.jar
+  --plugin-jar ../recaf-mcp-plugin/build/libs/recaf-mcp-plugin-1.1.1.jar
 ```
 
 运行器自动发现 Worker 身份，将输入复制到临时目录，生成小型多 DEX APK 和裸

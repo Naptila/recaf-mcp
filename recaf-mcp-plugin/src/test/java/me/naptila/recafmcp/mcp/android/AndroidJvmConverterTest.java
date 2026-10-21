@@ -1,14 +1,54 @@
 package me.naptila.recafmcp.mcp.android;
 
 import me.naptila.recafmcp.AndroidFidelityFixture;
+import me.darknet.dex.convert.ir.lowering.JvmLoweringPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Array;
 import java.util.List;
+import java.util.ArrayList;
+import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class AndroidJvmConverterTest {
+    @Test
+    void retriesWithAFreshTreeAndExecutesTheOptimizedFallback() throws Exception {
+        var info = AndroidDexReader.readClass(AndroidFidelityFixture.arrayDex("B", 1, List.of(-1, 2)),
+                "sample/ArrayPayload");
+        var original = info.getBackingDefinition();
+        int methodCount = original.getMethods().size();
+        List<JvmLoweringPolicy> attempts = new ArrayList<>();
+        byte[] bytecode = AndroidJvmConverter.convert(info, (definition, policy) -> {
+            attempts.add(policy);
+            assertNotSame(original, definition);
+            if (policy == JvmLoweringPolicy.DETERMINISTIC_LOCAL) {
+                definition.getMethods().clear();
+                throw new IllegalStateException("first conversion changed its private tree");
+            }
+            assertEquals(methodCount, definition.getMethods().size());
+            return AndroidJvmConverter.convertDefinition(definition, policy);
+        }).getBytecode();
+        Class<?> target = new ClassLoader() {
+            Class<?> define() { return defineClass("sample.ArrayPayload", bytecode, 0, bytecode.length); }
+        }.define();
+        assertArrayEquals(new byte[]{-1, 2}, (byte[]) target.getMethod("values").invoke(null));
+        assertEquals(List.of(JvmLoweringPolicy.DETERMINISTIC_LOCAL, JvmLoweringPolicy.AGGRESSIVE_OPTIMIZED), attempts);
+        assertEquals(methodCount, original.getMethods().size());
+    }
+
+    @Test
+    void reportsBothConversionFailures() throws Exception {
+        var info = AndroidDexReader.readClass(AndroidFidelityFixture.arrayDex("I", 4, List.of(1)),
+                "sample/ArrayPayload");
+        var error = assertThrows(IOException.class, () -> AndroidJvmConverter.convert(info, (definition, policy) -> {
+            throw new IllegalStateException(policy.name());
+        }));
+        assertEquals("DETERMINISTIC_LOCAL", error.getCause().getMessage());
+        assertEquals(1, error.getSuppressed().length);
+        assertEquals("AGGRESSIVE_OPTIMIZED", error.getSuppressed()[0].getMessage());
+    }
+
     @Test
     void convertsAndExecutesEveryPrimitiveArrayPayloadWithoutChangingTheDexTree() throws Exception {
         array("B", 1, List.of(-1, 2), List.of((byte) -1, (byte) 2));
