@@ -55,6 +55,21 @@ jobs:
         if: runner.os == 'Windows'
         run: .\gradlew.bat clean build --no-daemon
 
+      - name: Report Java test failures
+        if: failure()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          for report in Path('build/test-results/test').glob('TEST-*.xml'):
+              for case in ET.parse(report).getroot().findall('testcase'):
+                  for failure in list(case.findall('failure')) + list(case.findall('error')):
+                      text = f"{case.get('classname')}.{case.get('name')}: {failure.get('message')}\n{failure.text or ''}"
+                      text = text[:12000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f'::error title=Java test failure::{text}')
+          PY
+
       - name: Upload plugin JAR
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
