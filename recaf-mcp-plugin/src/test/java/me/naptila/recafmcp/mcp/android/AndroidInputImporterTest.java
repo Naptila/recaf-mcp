@@ -135,7 +135,19 @@ class AndroidInputImporterTest {
                             .getBackingDefinition().getMethod("greet", "()V").getCode().getInstructions().toString().contains("after"));
                 } finally { reopened.close(); }
             } finally { manager.setCurrentIgnoringConditions(null); }
+            // Export must release its input mapping without waiting for GC.
+            Files.delete(input);
         }
+    }
+
+    @Test
+    void releasesMappedInputAfterFailedExport() throws Exception {
+        Path input = apk(Map.of("classes.dex", AndroidFixture.dex("sample/Greeter", "before")), false);
+        var resource = importer().readIfAndroid(input);
+        try {
+            assertThrows(IOException.class, () -> new AndroidArchiveExporter(resource).export(directory));
+        } finally { resource.close(); }
+        Files.delete(input);
     }
 
     @Test
@@ -213,7 +225,7 @@ class AndroidInputImporterTest {
     }
 
     private static byte[] compressed(Path path, String name) throws IOException {
-        try (var archive = ZipIO.readJvm(path)) {
+        try (var archive = ZipIO.readJvm(Files.readAllBytes(path))) {
             var central = archive.getCentralDirectories().stream().filter(entry -> entry.getFileNameAsString().equals(name)).findFirst().orElseThrow();
             return central.getLinkedFileHeader().getFileData().asSlice(0, central.getCompressedSize()).toArray(ValueLayout.JAVA_BYTE);
         }

@@ -13,9 +13,12 @@ import software.coley.recaf.workspace.model.resource.WorkspaceResourceBuilder;
 
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -67,7 +70,11 @@ public final class AndroidArchiveExporter {
     private void copyCompressed(Path destination, Map<String, FileInfo> files,
                                 Map<String, byte[]> replacements) throws IOException {
         var backing = resource.archive();
-        try (var archive = ZipIO.readJvm(backing.path());
+        // Own the mapping lifetime: ZipIO's Path overload unmaps only after GC,
+        // which can keep the APK locked on Windows after the workspace closes.
+        try (var channel = FileChannel.open(backing.path(), StandardOpenOption.READ);
+             var arena = Arena.ofConfined();
+             var archive = ZipIO.readJvm(channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size(), arena));
              var output = new BufferedOutputStream(Files.newOutputStream(destination), 65536)) {
             if (archive.getCentralDirectories().size() != backing.entries().size()) {
                 throw new IOException("ZIP directory inventory differs from the opened APK");
