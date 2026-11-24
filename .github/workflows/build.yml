@@ -128,25 +128,50 @@ jobs:
       contents: write
 
     steps:
-      - name: Download plugin JAR
+      - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: recaf-mcp-plugin
+          pattern: recaf-mcp-*
           path: release
-
-      - name: Download bridge distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: recaf-mcp-bridge
-          path: release
+          merge-multiple: true
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            release/* \
+          PREV_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+          ENDPOINT="repos/$GITHUB_REPOSITORY/commits?sha=$GITHUB_REF_NAME&per_page=100"
+          JQ_ROOT='reverse'
+          if [ -n "$PREV_TAG" ]; then
+            ENDPOINT="repos/$GITHUB_REPOSITORY/compare/${PREV_TAG}...${GITHUB_REF_NAME}"
+            JQ_ROOT='.commits'
+          fi
+
+          NOTES=$(gh api "$ENDPOINT" --jq "$JQ_ROOT"'
+            | map(select((.parents | length) <= 1))
+            | map({
+                msg: (.commit.message | split("\n")[0]),
+                sha: .sha[0:7],
+                user: (.author.login // .commit.author.name)
+              })
+            | map(select(.msg | test("^(chore|ci)(\\([^)]*\\))?!?:") | not))
+            | map(
+                if (.msg | test("\\(#[0-9]+\\)$")) then
+                  "- \(.msg | sub("\\s*\\(#(?<pr>[0-9]+)\\)$"; "")) @\(.user) (#\(.msg | capture("\\(#(?<pr>[0-9]+)\\)$").pr))"
+                else
+                  "- \(.msg) @\(.user) (\(.sha))"
+                end
+              ) | join("\n")')
+
+          {
+            echo "## Changes"
+            echo ""
+            echo "${NOTES:-- Initial release}"
+            [ -n "$PREV_TAG" ] && printf "\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n" "$GITHUB_REPOSITORY" "$PREV_TAG" "$GITHUB_REF_NAME"
+          } > release-notes.md
+
+          gh release create "$GITHUB_REF_NAME" release/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --generate-notes \
+            --notes-file release-notes.md \
             --title "$GITHUB_REF_NAME"
