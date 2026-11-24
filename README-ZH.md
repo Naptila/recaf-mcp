@@ -33,7 +33,7 @@ MCP 客户端 ── stdio ──> Python 桥接器 ── 带认证的本地回
 
 - **JDK 25**：用于项目构建与启动 Worker 进程（插件生成 Java 22 兼容字节码；`patch_class`
   需要带 `javac` 的完整 JDK，不能使用 JRE）。
-- **Recaf 4 通用可执行 JAR**（`recaf-*-jar-with-dependencies.jar`）：`1.2.0`
+- **Recaf 4 通用可执行 JAR**（`recaf-*-jar-with-dependencies.jar`）：`1.2.1`
   适配 [Recaf 提交 `42368be5`](https://github.com/Col-E/Recaf/commit/42368be5126f737ffa99229d707ae013aacc490f)
   （2026-11-02），包含 Jasm 3.2 以及 Recaf 原生结构查询与多阶段转换计划 API。升级插件时请同步更新旧版 Recaf 快照。
 - **Python 3.11+** 与 [`uv`](https://docs.astral.sh/uv/)。
@@ -49,7 +49,7 @@ Bridge；与首次目录发现版本不一致的 Worker 会被拒绝。
 ### 从 GitHub Release 安装（推荐）
 
 1. 从 [最新 GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
-   下载 `recaf-mcp-plugin-1.2.0.jar`，放入 Recaf 的用户插件目录：
+   下载 `recaf-mcp-plugin-1.2.1.jar`，放入 Recaf 的用户插件目录：
 
    | 平台 | Recaf 插件目录 |
    | --- | --- |
@@ -60,7 +60,7 @@ Bridge；与首次目录发现版本不一致的 Worker 会被拒绝。
 2. 使用 `uv` 安装跨平台 Bridge 命令行工具：
 
    ```bash
-   uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.2.0/recaf_mcp_bridge-1.2.0-py3-none-any.whl
+   uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.2.1/recaf_mcp_bridge-1.2.1-py3-none-any.whl
    ```
 
 升级版本时，请确保 Recaf 插件目录中**仅保留一个** `recaf-mcp-plugin*.jar`，使用
@@ -72,7 +72,7 @@ Bridge；与首次目录发现版本不一致的 Worker 会被拒绝。
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.2.0.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.2.1.jar ~/.config/Recaf/plugins/
 
 cd ..
 uv tool install ./recaf-mcp-bridge

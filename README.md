@@ -35,7 +35,7 @@ dynamic tool-list notifications.
 - **JDK 25** for building and running Workers (`patch_class` requires a full JDK
   with `javac`, not a JRE; the plugin emits Java 22-compatible bytecode).
 - **Recaf 4 generic executable JAR** (`recaf-*-jar-with-dependencies.jar`).
-  Version `1.2.0` targets [Recaf commit `42368be5`](https://github.com/Col-E/Recaf/commit/42368be5126f737ffa99229d707ae013aacc490f)
+  Version `1.2.1` targets [Recaf commit `42368be5`](https://github.com/Col-E/Recaf/commit/42368be5126f737ffa99229d707ae013aacc490f)
   (2026-11-02), including Jasm 3.2 and Recaf's native structural query and
   transformation plan APIs. Update older Recaf snapshots when upgrading.
 - **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/).
@@ -52,7 +52,7 @@ discovery are rejected.
 
 ### From a GitHub Release (recommended)
 
-1. Download `recaf-mcp-plugin-1.2.0.jar` from the
+1. Download `recaf-mcp-plugin-1.2.1.jar` from the
    [latest GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
    and place it in Recaf's user `plugins` directory:
 
@@ -65,7 +65,7 @@ discovery are rejected.
 2. Install the Bridge CLI with `uv`:
 
    ```bash
-   uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.2.0/recaf_mcp_bridge-1.2.0-py3-none-any.whl
+   uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.2.1/recaf_mcp_bridge-1.2.1-py3-none-any.whl
    ```
 
 When upgrading, keep **only one** `recaf-mcp-plugin*.jar` inside Recaf's
@@ -78,7 +78,7 @@ and restart your MCP client connection.
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.2.0.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.2.1.jar ~/.config/Recaf/plugins/
 
 cd ..
 uv tool install ./recaf-mcp-bridge
