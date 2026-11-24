@@ -49,8 +49,11 @@ final class MethodAssemblySupport {
                           String descriptor) {
         JvmClassBundle bundle = resource.getJvmClassBundle();
         JvmClassInfo classInfo = bundle.get(owner);
-        if (classInfo == null && owner != null && owner.contains("\\u")) {
-            classInfo = bundle.get(ClassToolSupport.normalizeUnicodeInput(owner));
+        if (classInfo == null && owner != null) {
+            String normalizedOwner = ClassToolSupport.normalizeClassNameInput(owner);
+            if (!normalizedOwner.equals(owner)) {
+                classInfo = bundle.get(normalizedOwner);
+            }
         }
         if (classInfo == null) {
             return null;

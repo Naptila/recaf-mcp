@@ -191,9 +191,10 @@ public final class SearchCodeTool implements McpTool {
                 workspace.getPrimaryResource(),
                 selection
         );
+        Predicate<String> filterMatcher = ClassToolSupport.classFilterMatcher(filter, false);
         List<ClassToolSupport.Entry> classes = availableClasses
                 .stream()
-                .filter(entry -> filter == null || entry.className().contains(filter))
+                .filter(entry -> filterMatcher.test(entry.className()))
                 .toList();
         if (classes.size() > MAX_IMPLICIT_DECOMPILATION_CLASSES && !allowLargeScan) {
             return largeScopeError(

@@ -185,12 +185,13 @@ public final class SearchInstructionsTool implements McpTool {
             return selectionError;
         }
 
+        Predicate<String> filterMatcher = ClassToolSupport.classFilterMatcher(filter, false);
         List<ClassToolSupport.Entry> selectedEntries = ClassToolSupport.entries(
                         primary,
                         selection
                 )
                 .stream()
-                .filter(entry -> filter == null || entry.className().contains(filter))
+                .filter(entry -> filterMatcher.test(entry.className()))
                 .toList();
         int classesSelected = selectedEntries.size();
         List<InstructionHit> hits = new ArrayList<>(searchOperation.run(

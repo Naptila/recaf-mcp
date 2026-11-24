@@ -42,16 +42,16 @@ final class StructureQuerySupport {
         if (query.isEmpty()) {
             throw new IllegalArgumentException("query must contain a structural constraint");
         }
-        var builder = new ClassQueryBuilder().name(name(query)).accessFlags(access(query));
+        var builder = new ClassQueryBuilder().name(name(query, true)).accessFlags(access(query));
         if (query.has("fields")) {
             List<FieldMatcher> fields = new ArrayList<>();
             for (JsonElement value : array(query, "fields", MAX_MEMBERS)) {
                 JsonObject field = object(value, "field");
                 ToolArguments.rejectUnknown(field, FIELD_KEYS);
-                var fieldBuilder = new FieldMatcherBuilder().name(name(field)).accessFlags(access(field));
+                var fieldBuilder = new FieldMatcherBuilder().name(name(field, false)).accessFlags(access(field));
                 String descriptor = ToolArguments.optionalString(field, "descriptor");
                 if (descriptor != null) {
-                    fieldBuilder.type(fieldType(descriptor));
+                    fieldBuilder.type(fieldType(ClassToolSupport.normalizeUnicodeInput(descriptor)));
                 }
                 fields.add(fieldBuilder.build());
             }
@@ -62,10 +62,10 @@ final class StructureQuerySupport {
             for (JsonElement value : array(query, "methods", MAX_MEMBERS)) {
                 JsonObject method = object(value, "method");
                 ToolArguments.rejectUnknown(method, METHOD_KEYS);
-                var methodBuilder = new MethodMatcherBuilder().name(name(method)).accessFlags(access(method));
+                var methodBuilder = new MethodMatcherBuilder().name(name(method, false)).accessFlags(access(method));
                 String descriptor = ToolArguments.optionalString(method, "descriptor");
                 if (descriptor != null) {
-                    Type type = methodType(descriptor);
+                    Type type = methodType(ClassToolSupport.normalizeUnicodeInput(descriptor));
                     methodBuilder.returnType(type.getReturnType()).exactParameters(type.getArgumentTypes());
                 }
                 MethodMatcher matcher = methodBuilder.build();
@@ -87,7 +87,7 @@ final class StructureQuerySupport {
         return builder.build();
     }
 
-    private static Matcher<String> name(JsonObject object) {
+    private static Matcher<String> name(JsonObject object, boolean className) {
         String name = ToolArguments.optionalString(object, "name");
         boolean regex = ToolArguments.bool(object, "regex", false);
         if (name == null) {
@@ -100,7 +100,10 @@ final class StructureQuerySupport {
             throw new IllegalArgumentException("name is too long");
         }
         if (!regex) {
-            return Matchers.exact(name);
+            String normalized = className
+                    ? ClassToolSupport.normalizeClassNameInput(name)
+                    : ClassToolSupport.normalizeUnicodeInput(name);
+            return Matchers.exact(normalized);
         }
         SearchToolSupport.validateRegex(name, "name");
         Pattern pattern = Pattern.compile(name);

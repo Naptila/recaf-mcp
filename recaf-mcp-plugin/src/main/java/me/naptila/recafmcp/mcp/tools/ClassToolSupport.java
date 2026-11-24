@@ -290,6 +290,34 @@ final class ClassToolSupport {
         return JasmEscapeSupport.unescapeSafeIdentifierUnicode(value);
     }
 
+    static String normalizeClassNameInput(String value) {
+        if (value == null) {
+            return null;
+        }
+        String unescaped = normalizeUnicodeInput(value);
+        if (unescaped.indexOf('.') >= 0 && unescaped.indexOf('/') < 0) {
+            return unescaped.replace('.', '/');
+        }
+        return unescaped;
+    }
+
+    static java.util.function.Predicate<String> classFilterMatcher(String filter, boolean regex) {
+        if (filter == null) {
+            return ignored -> true;
+        }
+        if (regex) {
+            return SearchToolSupport.matcher(filter, true);
+        }
+        String unescaped = normalizeUnicodeInput(filter);
+        String slashed = normalizeClassNameInput(filter);
+        boolean checkUnescaped = !unescaped.equals(filter);
+        boolean checkSlashed = !slashed.equals(filter) && !slashed.equals(unescaped);
+        return className -> className != null
+                && (className.contains(filter)
+                || (checkUnescaped && className.contains(unescaped))
+                || (checkSlashed && className.contains(slashed)));
+    }
+
     static Entry identify(WorkspaceResource primary, ClassInfo classInfo) {
         return identify(primary, null, classInfo);
     }
@@ -490,7 +518,7 @@ final class ClassToolSupport {
             }
         }
         if (requestedClassName != null && !primary.getEmbeddedResources().isEmpty()) {
-            String normClass = normalizeUnicodeInput(requestedClassName);
+            String normClass = normalizeClassNameInput(requestedClassName);
             List<String> foundResources = new ArrayList<>();
             for (ScopedResource embedded : embeddedResources(primary)) {
                 Selection embSel = new Selection(Scope.ALL, null, true, null, false);
@@ -568,6 +596,9 @@ final class ClassToolSupport {
         for (var member : members) {
             String mName = member.getName();
             String mDesc = member.getDescriptor();
+            if (mName.equals(normName) && Objects.equals(normDesc, mDesc)) {
+                continue;
+            }
             boolean sameDesc = normDesc != null && normDesc.equals(mDesc);
             boolean sameCodepoints = hasSameCodepointMultiset(normName, mName);
             int dist = boundedEditDistance(normName, mName, Math.max(4, normName.length()));

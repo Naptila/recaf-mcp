@@ -145,7 +145,7 @@ public final class GetClassBytecodeTool implements McpTool {
         } catch (Exception ex) {
             return error(
                     "class bytecode encoding failed: " + exceptionMessage(ex),
-                    className,
+                    target.className(),
                     selection,
                     List.of()
             );
@@ -153,13 +153,13 @@ public final class GetClassBytecodeTool implements McpTool {
         if (bytecode.length > MAX_BYTECODE_SIZE) {
             return error(
                     "class bytecode exceeds the 16 MiB response limit",
-                    className,
+                    target.className(),
                     selection,
                     List.of()
             );
         }
         JsonObject structured = new JsonObject();
-        structured.addProperty("class_name", className);
+        structured.addProperty("class_name", target.className());
         ClassToolSupport.addIdentity(structured, target);
         structured.addProperty("size_bytes", bytecode.length);
         String sha256 = sha256(bytecode);
@@ -187,7 +187,7 @@ public final class GetClassBytecodeTool implements McpTool {
         if (ConditionalReadSupport.matches(ifSha256, sha256)) {
             ConditionalReadSupport.markUnchanged(structured);
             return McpTool.successResult(
-                    "bytecode unchanged for " + className,
+                    "bytecode unchanged for " + target.className(),
                     structured
             );
         }
@@ -205,7 +205,8 @@ public final class GetClassBytecodeTool implements McpTool {
             structured.add("next_offset", JsonNull.INSTANCE);
         }
         return McpTool.successResult(
-                "returned " + chunk.length + " of " + bytecode.length + " bytes for " + className,
+                "returned " + chunk.length + " of " + bytecode.length + " bytes for "
+                        + target.className(),
                 structured
         );
     }

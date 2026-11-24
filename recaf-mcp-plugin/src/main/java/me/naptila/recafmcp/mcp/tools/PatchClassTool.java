@@ -149,7 +149,8 @@ public final class PatchClassTool implements McpTool {
     @Override
     public JsonObject execute(JsonObject arguments) {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
-        String className = ToolArguments.requiredString(arguments, "class_name");
+        String rawClassName = ToolArguments.requiredString(arguments, "class_name");
+        String className = ClassToolSupport.normalizeClassNameInput(rawClassName);
         String source = ToolArguments.requiredString(arguments, "source");
         String versionPolicy = ToolArguments.optionalString(arguments, "target_version_policy");
         if (versionPolicy == null) {
@@ -179,11 +180,11 @@ public final class PatchClassTool implements McpTool {
         Workspace workspace = workspaceSupplier.get();
         JvmClassBundle bundle = workspace.getPrimaryResource().getJvmClassBundle();
         JvmClassInfo existing = bundle.get(className);
-        if (existing == null && className.contains("\\u")) {
-            String unescaped = ClassToolSupport.normalizeUnicodeInput(className);
-            existing = bundle.get(unescaped);
-            if (existing != null) {
-                className = unescaped;
+        if (existing == null && !rawClassName.equals(className)) {
+            JvmClassInfo rawExisting = bundle.get(rawClassName);
+            if (rawExisting != null) {
+                existing = rawExisting;
+                className = rawClassName;
             }
         }
         if (existing == null) {

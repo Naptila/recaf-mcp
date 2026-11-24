@@ -411,7 +411,7 @@ public final class DecompileClassTool implements McpTool {
             structuredContent.addProperty("result_type", "fallback");
             structuredContent.addProperty("fallback_reason", fallbackReason);
             return buildSourceResult(
-                    className,
+                    target.className(),
                     "DalvikJasmFallback",
                     jasm,
                     ifSha256,

@@ -209,12 +209,18 @@ public final class SearchMembersTool implements McpTool {
                 request.descriptorMatchMode()
         );
 
+        Predicate<String> filterMatches = ClassToolSupport.classFilterMatcher(
+                request.filter(),
+                false
+        );
+
         int classesSelected;
         SearchOutcome outcome;
         if (usesDefaultRecafSearch && request.results().equals("declarations")) {
             List<ClassToolSupport.Entry> candidateEntries = selectDeclarationEntries(
                     primary,
-                    request
+                    request,
+                    filterMatches
             );
             classesSelected = candidateEntries.size();
             outcome = scanDirectDeclarations(
@@ -230,8 +236,7 @@ public final class SearchMembersTool implements McpTool {
                             request.selection()
                     )
                     .stream()
-                    .filter(entry -> request.filter() == null
-                            || entry.className().contains(request.filter()))
+                    .filter(entry -> filterMatches.test(entry.className()))
                     .toList();
             classesSelected = selectedEntries.size();
             try {
@@ -246,6 +251,7 @@ public final class SearchMembersTool implements McpTool {
         hits.removeIf(hit -> !matchesRequest(
                 hit,
                 request,
+                filterMatches,
                 ownerMatches,
                 nameMatches,
                 descriptorMatches
@@ -278,7 +284,8 @@ public final class SearchMembersTool implements McpTool {
 
     private static List<ClassToolSupport.Entry> selectDeclarationEntries(
             WorkspaceResource primary,
-            SearchRequest request) {
+            SearchRequest request,
+            Predicate<String> filterMatches) {
         if (request.matchMode() == SearchToolSupport.MatchMode.EXACT
                 && request.owner() != null) {
             return ClassToolSupport.exact(
@@ -287,8 +294,7 @@ public final class SearchMembersTool implements McpTool {
                             request.owner()
                     )
                     .stream()
-                    .filter(entry -> request.filter() == null
-                            || entry.className().contains(request.filter()))
+                    .filter(entry -> filterMatches.test(entry.className()))
                     .toList();
         }
         Predicate<String> ownerMatches = SearchToolSupport.matcher(
@@ -297,8 +303,7 @@ public final class SearchMembersTool implements McpTool {
         );
         return ClassToolSupport.entries(primary, request.selection())
                 .stream()
-                .filter(entry -> request.filter() == null
-                        || entry.className().contains(request.filter()))
+                .filter(entry -> filterMatches.test(entry.className()))
                 .filter(entry -> ownerMatches.test(entry.className()))
                 .toList();
     }
@@ -382,13 +387,16 @@ public final class SearchMembersTool implements McpTool {
                                    SearchService searchService,
                                    StringPredicateProvider provider,
                                    SearchRequest request) {
+        Predicate<String> filterMatches = ClassToolSupport.classFilterMatcher(
+                request.filter(),
+                false
+        );
         List<ClassToolSupport.Entry> selectedEntries = ClassToolSupport.entries(
                         workspace.getPrimaryResource(),
                         request.selection()
                 )
                 .stream()
-                .filter(entry -> request.filter() == null
-                        || entry.className().contains(request.filter()))
+                .filter(entry -> filterMatches.test(entry.className()))
                 .toList();
         return runSearch(workspace, searchService, provider, request, selectedEntries);
     }
@@ -557,8 +565,8 @@ public final class SearchMembersTool implements McpTool {
             SearchToolSupport.validateRegex(owner, "owner");
             SearchToolSupport.validateRegex(name, "name");
         } else {
-            if (owner != null && owner.contains("\\u")) {
-                owner = JasmEscapeSupport.unescapeSafeIdentifierUnicode(owner);
+            if (owner != null) {
+                owner = ClassToolSupport.normalizeClassNameInput(owner);
             }
             if (name != null && name.contains("\\u")) {
                 name = JasmEscapeSupport.unescapeSafeIdentifierUnicode(name);
@@ -639,6 +647,7 @@ public final class SearchMembersTool implements McpTool {
 
     private static boolean matchesRequest(MemberHit hit,
                                           SearchRequest request,
+                                          Predicate<String> filterPredicate,
                                           Predicate<String> ownerMatches,
                                           Predicate<String> nameMatches,
                                           Predicate<String> descriptorMatches) {
@@ -646,8 +655,7 @@ public final class SearchMembersTool implements McpTool {
                 || request.kind().equals(hit.memberKind());
         boolean resultMatches = request.results().equals("both")
                 || request.results().equals(hit.resultType() + "s");
-        boolean filterMatches = request.filter() == null
-                || hit.className().contains(request.filter());
+        boolean filterMatches = filterPredicate.test(hit.className());
         return kindMatches
                 && resultMatches
                 && filterMatches

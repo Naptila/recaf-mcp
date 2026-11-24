@@ -168,7 +168,8 @@ public final class SearchStringsTool implements McpTool {
                 selection
         ));
         if (filter != null) {
-            hits.removeIf(hit -> !hit.className().contains(filter));
+            var filterMatcher = ClassToolSupport.classFilterMatcher(filter, false);
+            hits.removeIf(hit -> !filterMatcher.test(hit.className()));
         }
         hits.sort(HIT_ORDER);
         JsonArray page = new JsonArray();

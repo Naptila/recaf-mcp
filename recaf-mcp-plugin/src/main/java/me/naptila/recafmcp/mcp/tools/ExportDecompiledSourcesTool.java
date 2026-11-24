@@ -186,7 +186,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         if (regex) {
             SearchToolSupport.validateRegex(filter, "filter");
         }
-        Predicate<String> classMatcher = SearchToolSupport.matcher(filter, regex);
+        Predicate<String> classMatcher = ClassToolSupport.classFilterMatcher(filter, regex);
         ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true, true);
         String requestedDecompiler = ToolArguments.optionalString(arguments, "decompiler");
         boolean includeInnerClasses = ToolArguments.bool(arguments, "include_inner_classes", false);

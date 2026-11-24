@@ -82,12 +82,13 @@ public final class ListClassesTool implements McpTool {
             return selectionError;
         }
 
+        var filterMatcher = ClassToolSupport.classFilterMatcher(filter, false);
         List<ClassToolSupport.Entry> entries = ClassToolSupport.entries(
                         primary,
                         selection
                 )
                 .stream()
-                .filter(entry -> filter == null || entry.className().contains(filter))
+                .filter(entry -> filterMatcher.test(entry.className()))
                 .toList();
         int start = Math.min(offset, entries.size());
         int end = Math.min(start + limit, entries.size());
