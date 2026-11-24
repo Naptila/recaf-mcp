@@ -781,61 +781,82 @@ public final class CallGraphTool implements McpTool {
                 List.of()
         );
         if (!candidates.isEmpty()) {
-            for (MethodIdentity candidate : candidates) {
-                if (Objects.equals(candidate.dexName(), caller.dexName())) {
-                    return candidate;
-                }
-            }
-            return candidates.getFirst();
+            return preferredCandidate(candidates, caller.dexName());
         }
         String effectiveUnresolvedOwner = reference.owner();
         if (classesByName != null && !"<init>".equals(reference.name())
                 && !"<clinit>".equals(reference.name())) {
-            Queue<String> superQueue = new ArrayDeque<>();
-            Set<String> visitedSupers = new HashSet<>();
             software.coley.recaf.info.ClassInfo startInfo = classesByName.get(reference.owner());
             if (startInfo != null) {
+                Set<String> visitedSupers = new HashSet<>();
                 visitedSupers.add(reference.owner());
-                if (startInfo.getSuperName() != null && visitedSupers.add(startInfo.getSuperName())) {
-                    superQueue.add(startInfo.getSuperName());
-                }
-                for (String iface : startInfo.getInterfaces()) {
-                    if (iface != null && visitedSupers.add(iface)) {
-                        superQueue.add(iface);
+                List<software.coley.recaf.info.ClassInfo> classChain = new ArrayList<>();
+                classChain.add(startInfo);
+                String firstExternalSuperClass = null;
+                software.coley.recaf.info.ClassInfo cursor = startInfo;
+                while (cursor != null) {
+                    String superName = cursor.getSuperName();
+                    if (superName == null || !visitedSupers.add(superName)) {
+                        break;
                     }
-                }
-            }
-            String firstExternalSuper = null;
-            while (!superQueue.isEmpty()) {
-                String superOwner = superQueue.remove();
-                List<MethodIdentity> inherited = definitions.getOrDefault(
-                        new MethodKey(superOwner, reference.name(), reference.descriptor()),
-                        List.of()
-                );
-                if (!inherited.isEmpty()) {
-                    for (MethodIdentity candidate : inherited) {
-                        if (Objects.equals(candidate.dexName(), caller.dexName())) {
-                            return candidate;
+                    List<MethodIdentity> inherited = definitions.getOrDefault(
+                            new MethodKey(superName, reference.name(), reference.descriptor()),
+                            List.of()
+                    );
+                    if (!inherited.isEmpty()) {
+                        return preferredCandidate(inherited, caller.dexName());
+                    }
+                    software.coley.recaf.info.ClassInfo superInfo = classesByName.get(superName);
+                    if (superInfo != null) {
+                        classChain.add(superInfo);
+                        cursor = superInfo;
+                    } else {
+                        if (firstExternalSuperClass == null && !"java/lang/Object".equals(superName)) {
+                            firstExternalSuperClass = superName;
                         }
+                        break;
                     }
-                    return inherited.getFirst();
                 }
-                software.coley.recaf.info.ClassInfo superInfo = classesByName.get(superOwner);
-                if (superInfo != null) {
-                    if (superInfo.getSuperName() != null && visitedSupers.add(superInfo.getSuperName())) {
-                        superQueue.add(superInfo.getSuperName());
-                    }
-                    for (String iface : superInfo.getInterfaces()) {
+
+                Queue<String> ifaceQueue = new ArrayDeque<>();
+                for (software.coley.recaf.info.ClassInfo chainInfo : classChain) {
+                    for (String iface : chainInfo.getInterfaces()) {
                         if (iface != null && visitedSupers.add(iface)) {
-                            superQueue.add(iface);
+                            ifaceQueue.add(iface);
                         }
                     }
-                } else if (firstExternalSuper == null && !"java/lang/Object".equals(superOwner)) {
-                    firstExternalSuper = superOwner;
                 }
-            }
-            if (firstExternalSuper != null) {
-                effectiveUnresolvedOwner = firstExternalSuper;
+                String firstExternalInterface = null;
+                while (!ifaceQueue.isEmpty()) {
+                    String ifaceOwner = ifaceQueue.remove();
+                    List<MethodIdentity> inherited = definitions.getOrDefault(
+                            new MethodKey(ifaceOwner, reference.name(), reference.descriptor()),
+                            List.of()
+                    );
+                    if (!inherited.isEmpty()) {
+                        return preferredCandidate(inherited, caller.dexName());
+                    }
+                    software.coley.recaf.info.ClassInfo ifaceInfo = classesByName.get(ifaceOwner);
+                    if (ifaceInfo != null) {
+                        if (ifaceInfo.getSuperName() != null
+                                && visitedSupers.add(ifaceInfo.getSuperName())) {
+                            ifaceQueue.add(ifaceInfo.getSuperName());
+                        }
+                        for (String parentIface : ifaceInfo.getInterfaces()) {
+                            if (parentIface != null && visitedSupers.add(parentIface)) {
+                                ifaceQueue.add(parentIface);
+                            }
+                        }
+                    } else if (firstExternalInterface == null
+                            && !"java/lang/Object".equals(ifaceOwner)) {
+                        firstExternalInterface = ifaceOwner;
+                    }
+                }
+                if (firstExternalSuperClass != null) {
+                    effectiveUnresolvedOwner = firstExternalSuperClass;
+                } else if (firstExternalInterface != null) {
+                    effectiveUnresolvedOwner = firstExternalInterface;
+                }
             }
         }
         return new MethodIdentity(
@@ -847,6 +868,16 @@ public final class CallGraphTool implements McpTool {
                 null,
                 null
         );
+    }
+
+    private static MethodIdentity preferredCandidate(List<MethodIdentity> candidates,
+                                                     String preferredDexName) {
+        for (MethodIdentity candidate : candidates) {
+            if (Objects.equals(candidate.dexName(), preferredDexName)) {
+                return candidate;
+            }
+        }
+        return candidates.getFirst();
     }
 
     private static boolean stopAtExternal(GraphRequest request,
@@ -980,7 +1011,7 @@ public final class CallGraphTool implements McpTool {
                         truncated = true;
                         break;
                     }
-                    if (stopAtExternal(targetResource, request, callee)) {
+                    if (stopAtExternal(workspace, targetResource, request, callee)) {
                         externalVerticesStopped.add(callee.getMethod());
                     } else if (enqueue(pending, visited, callee, current.depth() + 1)) {
                         if (visited.size() >= MAX_VISITED_VERTICES) {
@@ -1013,7 +1044,7 @@ public final class CallGraphTool implements McpTool {
                         truncated = true;
                         break;
                     }
-                    if (stopAtExternal(targetResource, request, caller)) {
+                    if (stopAtExternal(workspace, targetResource, request, caller)) {
                         externalVerticesStopped.add(caller.getMethod());
                     } else if (enqueue(pending, visited, caller, current.depth() + 1)) {
                         if (visited.size() >= MAX_VISITED_VERTICES) {
@@ -1035,7 +1066,8 @@ public final class CallGraphTool implements McpTool {
         );
     }
 
-    private static boolean stopAtExternal(WorkspaceResource targetResource,
+    private static boolean stopAtExternal(Workspace workspace,
+                                          WorkspaceResource targetResource,
                                           GraphRequest request,
                                           MethodVertex vertex) {
         if (!request.stopAtExternal()) {
@@ -1044,10 +1076,15 @@ public final class CallGraphTool implements McpTool {
         if (vertex.getResolvedMethod() == null) {
             return true;
         }
+        String owner = vertex.getMethod().owner();
+        if (workspace != null) {
+            WorkspaceResource primary = workspace.getPrimaryResource();
+            return !ownsJvmClass(primary, owner) && !ownsJvmClassInEmbedded(primary, owner);
+        }
         if (targetResource == null) {
             return false;
         }
-        return !ownsJvmClass(targetResource, vertex.getMethod().owner());
+        return !ownsJvmClass(targetResource, owner) && !ownsJvmClassInEmbedded(targetResource, owner);
     }
 
     private static boolean ownsJvmClass(WorkspaceResource resource, String internalName) {
@@ -1086,7 +1123,10 @@ public final class CallGraphTool implements McpTool {
         }
         if (workspace != null) {
             WorkspaceResource primary = workspace.getPrimaryResource();
-            if (ownsJvmClass(primary, owner) || ownsJvmClassInEmbedded(primary, owner)) {
+            if (ownsJvmClass(primary, owner)) {
+                return "primary";
+            }
+            if (ownsJvmClassInEmbedded(primary, owner)) {
                 return "embedded";
             }
         }
