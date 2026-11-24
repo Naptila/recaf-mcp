@@ -130,7 +130,7 @@ class RecoveryRegistry:
     ) -> Path:
         """Atomically store enough secret state to authenticate this Worker."""
         if session.autosave_path is None:
-            raise RuntimeError("APK/DEX sessions do not have recoverable autosaves")
+            raise RuntimeError("Unsavable workspace sessions do not have recoverable autosaves")
         start_id = self._process_start_reader(session.process.pid)
         if start_id is None or session.process.returncode is not None:
             raise RuntimeError("Worker process identity cannot be persisted safely")
@@ -148,6 +148,7 @@ class RecoveryRegistry:
             "data_dir": str(session.data_dir),
             "log_path": str(session.log_path),
             "idle_ttl_sec": session.idle_ttl_sec,
+            "dirty": True,
             "plugin_build": identity.plugin_build,
             "schema_fingerprint": identity.schema_fingerprint,
             "save_error": error[:1000],
@@ -268,6 +269,7 @@ class RecoveryRegistry:
             last_touched=time.monotonic(),
             idle_ttl_sec=entry["idle_ttl_sec"],
             output_format=health.get("workspace_output_format"),
+            dirty=bool(entry.get("dirty", True)),
             save_error=(
                 str(save_error)[:1000]
                 if save_error is not None

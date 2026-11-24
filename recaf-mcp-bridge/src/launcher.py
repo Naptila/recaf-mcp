@@ -200,6 +200,32 @@ async def terminate_process_group(process: Process) -> None:
         await process.wait()
 
 
+_SUPPORTED_INPUT_MAGIC_PREFIXES: tuple[bytes, ...] = (
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"JM\x01\x00",
+    b"dex\n",
+    b"dey\n",
+    b"\xca\xfe\xba\xbe",
+)
+
+
+def validate_supported_input_magic(input_path: Path) -> None:
+    """Reject non-archive/non-bytecode inputs before booting a Worker JVM."""
+    try:
+        with input_path.open("rb") as handle:
+            prefix = handle.read(8)
+    except OSError as error:
+        raise WorkerLaunchError("input file could not be read") from error
+    if not prefix:
+        raise WorkerLaunchError("input file is empty")
+    if not any(prefix.startswith(magic) for magic in _SUPPORTED_INPUT_MAGIC_PREFIXES):
+        raise WorkerLaunchError(
+            "input file is not a supported JAR, APK, DEX, ZIP, JMOD, or JVM class file"
+        )
+
+
 class WorkerLauncher:
     """Launch Workers while owning all capacity, path, process, and retry state."""
 
@@ -215,6 +241,7 @@ class WorkerLauncher:
         process_terminator: ProcessTerminator = terminate_process_group,
         port_allocator: Callable[[], int] = allocate_loopback_port,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+        validate_input_format: bool | None = None,
     ) -> None:
         self._config = config.validate()
         self._sessions = sessions
@@ -225,6 +252,11 @@ class WorkerLauncher:
         self._process_terminator = process_terminator
         self._port_allocator = port_allocator
         self._sleep = sleep
+        self._validate_input_format = (
+            process_starter is start_worker_process
+            if validate_input_format is None
+            else validate_input_format
+        )
 
     async def launch(
         self,
@@ -241,7 +273,10 @@ class WorkerLauncher:
                 sid,
                 input_path,
                 autosave_path,
+                default_autosave_dir=self._config.effective_autosave_dir,
             )
+            if self._validate_input_format:
+                validate_supported_input_magic(paths.input_path)
             self._config.session_root.mkdir(
                 parents=True,
                 mode=0o700,

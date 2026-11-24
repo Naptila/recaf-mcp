@@ -44,7 +44,10 @@ LIFECYCLE_TOOLS = (
                 "idle_ttl_sec": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Optional per-session idle timeout in seconds.",
+                    "description": (
+                        "Optional per-session idle timeout in seconds "
+                        "(0 disables idle expiration)."
+                    ),
                 },
             },
             ["input_path"],
@@ -65,8 +68,9 @@ LIFECYCLE_TOOLS = (
     types.Tool(
         name="recaf_close",
         description=(
-            "Close a session; omitted save persists supported JAR/APK/DEX inputs. "
-            "APK output is unsigned; use save=false to discard."
+            "Close a session; omitted save persists unsaved changes for supported "
+            "JAR/APK/DEX inputs. APK output is unsigned; use save=true to force "
+            "export or save=false to discard."
         ),
         inputSchema=_object_schema(
             {
@@ -92,11 +96,15 @@ LIFECYCLE_TOOLS = (
     ),
     types.Tool(
         name="set_idle_ttl",
-        description="Update the idle timeout for one Recaf session.",
+        description="Update the idle timeout for one Recaf session (0 disables idle expiration).",
         inputSchema=_object_schema(
             {
                 "database": {"type": "string", "minLength": 1},
-                "idle_ttl_sec": {"type": "integer", "minimum": 0},
+                "idle_ttl_sec": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Idle timeout in seconds; pass 0 to disable idle expiration.",
+                },
             },
             ["database", "idle_ttl_sec"],
         ),
@@ -105,7 +113,7 @@ LIFECYCLE_TOOLS = (
 
 
 class LifecycleToolService:
-    """Dispatch Bridge-owned tools; session operations are attached in M3.2."""
+    """Dispatch Bridge-owned lifecycle tools when no Recaf runtime is configured."""
 
     def __init__(self, response_profile: str = "compact") -> None:
         if response_profile not in RESPONSE_PROFILES:

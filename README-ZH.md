@@ -2,105 +2,92 @@
 
 [English](README.md) | [简体中文](README-ZH.md)
 
-`recaf-mcp` 通过模型上下文协议（MCP）提供无头
-[Recaf](https://github.com/Col-E/Recaf) 分析与补丁能力。Python stdio
-桥接器负责管理相互隔离的 Recaf JVM，Java 插件负责执行实际分析。
+`recaf-mcp` 通过模型上下文协议（MCP）提供无头（headless）
+[Recaf 4](https://github.com/Col-E/Recaf) 字节码分析与补丁能力。Python stdio
+桥接器负责监管相互隔离的 Recaf Worker JVM，未遮蔽依赖的 Java 插件直接运行在你本地安装的
+Recaf 通用 JAR 中。
 
 ```text
-MCP 客户端 ── stdio ──> Python 桥接器 ── 带身份验证的回环 HTTP ──> Recaf Worker
-                                                               每个目标一个 JVM
+MCP 客户端 ── stdio ──> Python 桥接器 ── 带认证的本地回环 HTTP ──> Recaf Worker
+                                                              每个目标独占一个 JVM
 ```
 
-桥接器以无头模式使用已安装的 Recaf 通用 JAR。无需检出 Recaf 源码、构建修改版
-Recaf，也无需发布 Python 包。
+无需检出 Recaf 源码、无需自行编译修改版 Recaf，也不依赖 PyPI 发布包。
 
-## 功能概览
+## 核心能力
 
-| 领域 | 能力 |
+| 领域 | 支持能力 |
 | --- | --- |
-| 浏览 | 工作区摘要、类、归档文件、Android Manifest 和资源 |
-| 反编译 | 反编译单个类或将选定的所有类导出到 ZIP；支持 CFR、Procyon、Vineflower 或其他已安装的 Recaf 反编译器 |
-| 搜索 | 字符串、JVM/DEX 指令、反编译源码、成员声明/引用和调用图 |
-| 重命名 | 类、方法和字段；导入/导出 Recaf 支持的七种映射格式 |
-| 修改 JVM | 编译替换 Java 源码、运行安全的 Recaf 转换、编辑指定方法的指令 |
-| 分析 APK/DEX | Android 类、解码后的二进制 XML、DEX 字符串/指令/成员/调用，以及重建的单类 DEX |
-| 自动化 | 编译并运行与当前 Recaf 版本匹配的 Java 脚本，用于自定义反混淆 |
-| 会话管理 | 多个隔离 Worker、JAR 保存/重新打开、按格式处理空闲清理、取消和恢复 |
+| 浏览与资源编辑 | 工作区摘要（含多 DEX 明细与嵌套内嵌 JAR）、类列表、归档文件列表、解码后的 `AndroidManifest.xml`/二进制 XML/`resources.arsc` 资源表；支持通过 `write_file` 新增、编辑或删除主归档资源文件 |
+| 反编译 | 单类反编译或导出源码 ZIP；支持隔离超时线程池、默认 CFR 失败自动切 Vineflower、UTF-8 合法标识符文件名保留、内部类自动去重与 Dalvik Jasm `.jasm` 兜底 |
+| 搜索 | 字符串常量（含 `filter` 与 `location_kind`）、自动兼容 `\uXXXX` 与原始 Unicode 的 JVM/DEX 指令与反编译源码搜索、`exact`/`contains`/`regex` 成员查询（含独立 `descriptor_match`）、结构与 opcode 查询、调用图（含 JVM 未解析外部边、内嵌归档来源路径、Android `invoke-super` 继承解析与会话缓存） |
+| 重命名 | 精确分派族全层级重命名与写后校验（默认拦截 `AutoCloseable` 等外部库覆盖方法）；自动同步 JAR `MANIFEST.MF` + `META-INF/services/*` 与 APK 二进制 `AndroidManifest.xml`，支持 Mixin `package` 相对路径扫描与七种映射格式无损导出/导入 |
+| 修改 JVM | 编译替换 Java 源码（支持外部 `classpath`、内嵌 JAR 虚拟类路径与 `dry_run`）、运行白名单 Recaf 反混淆转换、ASM 字节码校验门禁保护的 Jasm 方法补丁（支持 `\uXXXX`/点分类名归一化与 `did_you_mean` 提示） |
+| 分析与修改 APK/DEX | 多 DEX 浏览/搜索/调用图、可编辑 Dalvik Jasm 方法补丁、符号重映射、单类 DEX 重建 |
+| 脚本自动化 | 编译并执行与当前 Recaf 版本匹配的 Java 脚本，支持结构化返回及主资源 + 内嵌资源类变更追踪 |
+| 会话管理 | 多并发隔离 Worker（启动前魔数快速校验与重复打开提醒）、JAR/APK/DEX 原子保存（JAR `MANIFEST.MF` 置首、重命名类保留原槽位、`jar_signature_status`、APK 16 KiB `.so` 页对齐、DEX 重写体积差统计、未改动 DEX/嵌套 JAR 原样保留）、按需脏状态自动保存与异常恢复 |
 
-全部 27 个工具都会在打开目标之前公布，因此客户端无需支持动态工具列表。完整工具目录见下文。
+全部 28 个工具都会在首次 `tools/list` 时一次性公布，客户端无需支持动态工具列表通知。
 
 ## 环境要求
 
-- JDK 25，用于仓库内置的 Gradle 工具链和 Worker 进程。插件生成兼容
-  Java 22 的字节码；`patch_class` 需要包含 `javac` 的 JDK，不能使用 JRE。
-- Recaf 4 通用可执行 JAR，其中包含 Recaf 的运行时依赖。
-  1.1.1 适配 [Recaf 构建 `9090128`](https://github.com/Col-E/Recaf/commit/909012806d893a61f68e2a66e174618c50840343)
-  （2026-10-18）及其汇编器/DEX API。升级插件前，请先更新旧版 Recaf 快照。
-- Python 3.11 或更高版本。
-- [`uv`](https://docs.astral.sh/uv/)，用于桥接器的锁定依赖环境。
+- **JDK 25**：用于项目构建与启动 Worker 进程（插件生成 Java 22 兼容字节码；`patch_class`
+  需要带 `javac` 的完整 JDK，不能使用 JRE）。
+- **Recaf 4 通用可执行 JAR**（`recaf-*-jar-with-dependencies.jar`）：`1.2.0`
+  适配 [Recaf 提交 `42368be5`](https://github.com/Col-E/Recaf/commit/42368be5126f737ffa99229d707ae013aacc490f)
+  （2026-11-02），包含 Jasm 3.2 以及 Recaf 原生结构查询与多阶段转换计划 API。升级插件时请同步更新旧版 Recaf 快照。
+- **Python 3.11+** 与 [`uv`](https://docs.astral.sh/uv/)。
 
-Worker 启动时会检查所需的 Jasm 和 DEX API，在会话就绪前拒绝不兼容的运行时。
-`get_recaf_script_help` 的 `recaf_version` / `recaf_commit` 表示实际加载的 JAR，
-`recaf_build_version` / `recaf_build_commit` 表示插件的编译基线，并返回
-`recaf_compatible` 和 `recaf_compatibility_errors`。这些 API 检查不保证所有未来
-快照的行为兼容。更换 Recaf JAR 后请重启 Bridge；它会拒绝与工具目录发现时
-版本不同的 Worker。
+Worker 启动时会在会话就绪前校验所需的 Recaf、Jasm 与 DEX API 边界。
+`get_recaf_script_help` 会同时报告当前实际加载的运行时（`recaf_version` / `recaf_commit`）
+与插件编译基线（`recaf_build_version` / `recaf_build_commit`），以及
+`recaf_compatible` 和 `recaf_compatibility_errors`。更换 `RECAF_JAR` 后请重启
+Bridge；与首次目录发现版本不一致的 Worker 会被拒绝。
 
 ## 安装
 
-### 从 Release 安装（推荐）
+### 从 GitHub Release 安装（推荐）
 
-无需检出源码或在本地构建项目。从
-[最新 GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
-下载
-[`recaf-mcp-plugin-1.1.1.jar`](https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf-mcp-plugin-1.1.1.jar)，
-并将其复制到 Recaf 插件目录：
+1. 从 [最新 GitHub Release](https://github.com/Naptila/recaf-mcp/releases/latest)
+   下载 `recaf-mcp-plugin-1.2.0.jar`，放入 Recaf 的用户插件目录：
 
-| 平台 | Recaf 插件目录 |
-| --- | --- |
-| Linux | `~/.config/Recaf/plugins` |
-| macOS | `~/Library/Application Support/Recaf/plugins` |
-| Windows | `%APPDATA%\Recaf\plugins` |
+   | 平台 | Recaf 插件目录 |
+   | --- | --- |
+   | Linux | `~/.config/Recaf/plugins` |
+   | macOS | `~/Library/Application Support/Recaf/plugins` |
+   | Windows | `%APPDATA%\Recaf\plugins` |
 
-直接从同一个 Release 安装跨平台 Bridge wheel：
+2. 使用 `uv` 安装跨平台 Bridge 命令行工具：
 
-```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf_mcp_bridge-1.1.1-py3-none-any.whl
-```
+   ```bash
+   uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.2.0/recaf_mcp_bridge-1.2.0-py3-none-any.whl
+   ```
 
-该命令会安装 `recaf-mcp-bridge`，项目本身无需发布到 PyPI。
-
-升级时，请将旧插件 JAR 备份到 Recaf 插件目录之外，目录内仅保留一个
-`recaf-mcp-plugin*.jar`。通过 `uv tool install --force` 加上面的 URL
-重新安装 Bridge wheel，再重启 MCP 连接并重新打开工作区，使两部分均使用 1.1.1。
+升级版本时，请确保 Recaf 插件目录中**仅保留一个** `recaf-mcp-plugin*.jar`，使用
+`uv tool install --force <url>` 更新 Bridge，并重启客户端的 MCP 连接。
 
 ### 从源码构建
-
-如果需要自行构建插件并从本地源码安装 Bridge：
 
 ```bash
 cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
 ./gradlew clean build
 mkdir -p ~/.config/Recaf/plugins
-cp build/libs/recaf-mcp-plugin-1.1.1.jar ~/.config/Recaf/plugins/
+cp build/libs/recaf-mcp-plugin-1.2.0.jar ~/.config/Recaf/plugins/
+
 cd ..
 uv tool install ./recaf-mcp-bridge
 ```
 
-使用任一方式完成安装后，将 `RECAF_JAR` 指向下载的通用可执行 JAR：
+### Stdio 启动命令
 
-```text
-RECAF_JAR=/absolute/path/to/recaf.jar
-```
-
-与客户端无关的 stdio 命令如下：
+将 `RECAF_JAR` 指向本地 Recaf 通用可执行 JAR：
 
 ```bash
-RECAF_JAR="$RECAF_JAR" recaf-mcp-bridge --stdio
+RECAF_JAR=/absolute/path/to/recaf.jar recaf-mcp-bridge --stdio
 ```
 
-标准输出仅用于 MCP 协议数据。请通过 MCP 客户端运行该命令，不要直接在交互式终端中
-运行；诊断信息会写入标准错误。
+标准输出仅传输 MCP JSON-RPC 协议帧，日志与诊断信息写入标准错误；请通过 MCP
+客户端调用该命令，不要直接在交互式终端运行。
 
 ## 客户端配置
 
@@ -108,7 +95,7 @@ RECAF_JAR="$RECAF_JAR" recaf-mcp-bridge --stdio
 | --- | --- |
 | Codex CLI | `codex mcp add recaf-mcp --env RECAF_JAR="$RECAF_JAR" -- recaf-mcp-bridge --stdio` |
 | Claude Code | `claude mcp add --scope user recaf-mcp -e RECAF_JAR="$RECAF_JAR" -- recaf-mcp-bridge --stdio` |
-| Antigravity / 其他 JSON 客户端 | 使用下方配置 |
+| Antigravity / 其他 JSON 客户端 | 使用下方配置（Antigravity 需显式设置 `RECAF_RESPONSE_PROFILE=legacy`） |
 
 ```json
 {
@@ -117,287 +104,194 @@ RECAF_JAR="$RECAF_JAR" recaf-mcp-bridge --stdio
       "command": "recaf-mcp-bridge",
       "args": ["--stdio"],
       "env": {
-        "RECAF_JAR": "/absolute/path/to/recaf.jar"
+        "RECAF_JAR": "/absolute/path/to/recaf.jar",
+        "RECAF_RESPONSE_PROFILE": "legacy"
       }
     }
   }
 }
 ```
 
-连接后调用 `recaf_list`；返回空的 `sessions` 数组，说明工具目录发现和 stdio
-路由工作正常。首次启动请预留 120 秒，普通长耗时操作预留 340 秒，
-`export_sources` 则预留 1,840 秒。如果客户端找不到命令，请使用
-`command -v recaf-mcp-bridge` 返回的绝对路径。
+- **为什么 Antigravity 需要 `RECAF_RESPONSE_PROFILE=legacy`？** Antigravity 的
+  `call_mcp_tool` 只向模型转发 `content` 文本块，不展示独立的 `structuredContent`
+  对象。开启 `legacy` 后，Bridge 会将完整结构化 JSON、反编译 Java 源码、Jasm
+  汇编以及文件文本同步附加到第二个文本块中。原生向模型暴露 `structuredContent`
+  的客户端保持默认 `compact` 即可，避免重复占用上下文。
+- **建议超时设置：** 首次启动发现工具目录建议预留 `120s`，复杂转换/脚本/大文件保存预留
+  `340s`，整包 `export_sources` 预留 `1840s`。若客户端 `PATH` 中找不到
+  `recaf-mcp-bridge`，请填写 `command -v recaf-mcp-bridge` 输出的绝对路径。
 
-## 第一次分析会话
+## 快速上手
 
-| 步骤 | 调用 | 结果 |
+| 步骤 | 调用示例 | 说明 |
 | ---: | --- | --- |
-| 1 | `recaf_list()` | 验证桥接器 |
-| 2 | `recaf_open(input_path="/absolute/target.jar")` | 返回不透明的 `database` ID |
-| 3 | `workspace_info(database=...)` | 汇总已加载的目标 |
-| 4 | `list_classes(database=...)` 或其他分析工具 | 开始分析 |
-| 5 | `recaf_save(database=..., output_path=...)` | 写出修改后的 JAR/APK/DEX |
-| 6 | `recaf_close(database=...)` | 保存并关闭会话 |
+| 1 | `recaf_list()` | 验证 Bridge 连接、活动/启动中会话与槽位容量 |
+| 2 | `recaf_open(input_path="/abs/path/target.jar")` | 启动隔离 Worker，返回不透明会话 ID `database` |
+| 3 | `workspace_info(database=...)` | 查看主资源与依赖中的 JVM 类、DEX 与归档文件数量 |
+| 4 | `list_classes`、`search_strings`、`decompile_class` 等 | 携带 `database` 执行浏览、搜索或修改 |
+| 5 | `recaf_save(database=..., output_path="/abs/path/out.jar")` | 按原格式原子导出 `MANIFEST.MF` 置首的 JAR、已 4B/16KiB 页对齐的未签名 APK 或 DEX |
+| 6 | `recaf_close(database=...)` | 默认仅自动保存已修改（`dirty=true`）的会话（`save=true` 强制保存，`save=false` 丢弃改动）并关闭 Worker |
 
-所有生命周期路径都必须是绝对路径。每次调用 Worker 工具时都要传入返回的
-`database`。省略 `save` 时，`recaf_close` 按检测到的原格式保存 JAR/APK/DEX。
-如需丢弃修改，请使用 `save=false`。APK 输出未签名，安装前需另行签名。
+所有传入生命周期或导出工具的文件路径都必须是绝对路径。导出的 JAR 会强制将 `META-INF/MANIFEST.MF` 置于归档最前（兼容 `JarInputStream`）并流式原样保留未修改条目、目录结构与时间戳；导出的 APK 会移除已失效的旧签名，并自动对未压缩 `STORED` 条目执行对齐（`.so` 原生库按 `16384` 字节即 16 KiB 页边界对齐，`resources.arsc` 及其他 `STORED` 资源按 `4` 字节对齐，满足 Android 15+ `zipalign -P 16 4` 要求），安装到设备前只需执行签名（如 `apksigner`）。
 
-## 配置
+## 配置说明
 
-MCP 客户端通常只需设置 `RECAF_JAR`。桥接器会在 Recaf 的标准插件目录中查找一个
-`recaf-mcp-plugin*.jar`，然后将它复制到每个 Worker 的私有目录中，从而避免加载
-其他已安装插件和普通 Recaf 配置。正常启动 Recaf GUI 时不存在 MCP 令牌，因此
-已安装的插件会保持休眠。
+Bridge 会在 Recaf 插件目录中定位唯一的 `recaf-mcp-plugin*.jar`，并将其复制到每个会话私有的插件目录中运行，不会加载用户的其他插件或普通 GUI 配置。日常打开 Recaf GUI 时因不存在 `RECAF_MCP_TOKEN`，该插件完全休眠。
 
-| 变量 | 默认值 | 用途 |
+| 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `RECAF_JAR` | 必填 | Recaf 通用可执行 JAR 的绝对路径 |
-| `RECAF_PLUGIN_JAR` | 自动发现 | 可选：指定确切的插件 JAR |
-| `RECAF_PLUGIN_DIR` | Recaf 标准目录 | 可选：指定插件发现目录 |
-| `RECAF_JAVA_COMMAND` | `java` | Worker 使用的 JDK 可执行文件 |
-| `RECAF_MAX_SESSIONS` | `2` | 并发等待/就绪 Worker 上限，取值 1–32 |
-| `RECAF_WORKER_MAX_HEAP_MB` | 自动 | 可选的每 Worker 堆上限，128–65536 MiB |
-| `RECAF_IDLE_TTL_SEC` | `600` | 空闲清理时间：自动保存支持的 JAR/APK/DEX 输入；`0` 表示禁用 |
-| `RECAF_RESPONSE_PROFILE` | `compact` | `compact` 避免重复 JSON 文本；`legacy` 恢复重复文本 |
-| `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | 等待 Worker 启动就绪的超时时间 |
-| `RECAF_SESSION_ROOT` | 系统临时目录 | 仅所有者可访问的实时会话目录 |
-| `RECAF_RECOVERY_DIR` | XDG state | 仅所有者可访问的异常关闭恢复记录 |
+| `RECAF_JAR` | 必填 | Recaf 4 通用可执行 JAR 的绝对路径 |
+| `RECAF_PLUGIN_JAR` | 自动发现 | 显式指定 `recaf-mcp-plugin-*.jar` 路径 |
+| `RECAF_PLUGIN_DIR` | Recaf 标准插件目录 | 未设置 `RECAF_PLUGIN_JAR` 时的插件查找目录 |
+| `RECAF_JAVA_COMMAND` | `java` | 启动 Worker 使用的 JDK `java` 命令 |
+| `RECAF_MAX_SESSIONS` | `4` | 最大并发（启动中 + 就绪）Worker 数量（`1`–`32`） |
+| `RECAF_WORKER_MAX_HEAP_MB` | 自动分配 | 每个 Worker 的固定堆上限 `-Xmx`（`128`–`65536` MiB） |
+| `RECAF_IDLE_TTL_SEC` | `600` | 默认空闲超时秒数，到期仅对已修改会话自动保存并关闭（`0` 为禁用） |
+| `RECAF_RESPONSE_PROFILE` | `compact` | `compact`（结构化结果 + 简短摘要）或 `legacy`（额外输出完整文本块） |
+| `RECAF_LAUNCH_TIMEOUT_SEC` | `60` | Worker 启动与工作区导入就绪超时秒数 |
+| `RECAF_SESSION_ROOT` | 系统临时目录 | 仅当前用户可访问的会话运行目录 |
+| `RECAF_AUTOSAVE_DIR` | XDG state 目录 | 默认托管自动保存目录（`~/.local/state/recaf-mcp/autosave`） |
+| `RECAF_RECOVERY_DIR` | XDG state 目录 | 仅当前用户可访问的异常退出恢复注册表目录 |
 
-未指定堆上限时，桥接器将每个 JVM 的 `-XX:MaxRAMPercentage` 设为
-60 除以 `RECAF_MAX_SESSIONS` 的数值。默认两个名额时，每个 Worker
-最多使用 JVM 可见内存的 30%；原生内存和其他进程也需要内存。可以设置
-`RECAF_WORKER_MAX_HEAP_MB=4096` 明确限制为 4 GiB；大 APK 内存不足时可继续调高。
-托管 APK 导入最多用四个读取线程扫描资源头，最多同时解析两个 DEX（堆小于
-1 GiB 时只解析一个）。每个 DEX 仅做一次保真读取，并在报告就绪前核对类集合。
-普通 JAR 仍采用串行导入。
-APK 资源保留在原 ZIP 中，显式读取时才完整加载；文件列表使用文件头预览及
-目录记录的大小；未读取文件的类型和字符集由预览推断，显式读取后按完整内容判断。
-内嵌 ZIP/JAR/APK 作为文件保留，不递归展开为工作区。
-会话关闭前应保持原始输入可用且不变。单个资源完整读取的上限为 Worker 堆的
-三分之一与 Java 字节数组上限中的较小值。
-导入修复作为干净的初始状态，不在撤销历史中保留重复的旧 DEX 树。
-APK 保存时编码当前 DEX 树，并流式复制未修改资源的压缩数据，无需将整个 APK
-加载进内存；ZIP64 输出采用流式解压再压缩。导出会核对完整资源清单；脚本新增
-的内嵌归档应放入文件集合，不支持新增内嵌工作区资源。输出安装前需对齐并签名。
-Dalvik Jasm 可能显示 `p0` 等参数别名和接收者 `this`，返回的汇编可以直接使用
-这些别名进行补丁；原生 DEX 脚本 API 仍使用物理寄存器编号。
-DEX 脚本需复制只读的 `Code.getInstructions()`，修改副本后安装新的 `Code`。
-`get_recaf_script_help(topic="workspace")` 已提供保留调试及异常处理元数据的完整示例。
-JVM 内存耗尽时 Worker 会退出，打开错误会明确指出内存不足，不再按端口冲突
-重复导入。导入较慢时可以设置 `RECAF_LAUNCH_TIMEOUT_SEC=120`；就绪超时也会直接
-失败并清理，不会重新启动导入。
-Recaf 报告工作区导入或插件初始化失败时，桥接器会停止 Worker 并立即返回原因，
-包括 DEX 的 `Unknown opcode` 错误，无需等待就绪超时。
+### 运行时与内存策略
 
-Android 保存及单类 DEX 编码还针对当前固定版本写入器遗漏的 `move-object/16`
-操作码应用临时兼容修复，保留其 16 位寄存器参数及指令宽度；编码结束或失败后
-都会恢复原来的操作码注册表。
-工作区保存采用 310 秒的 HTTP 超时，包括关闭前保存和自动保存，让大型导出可以
-超过普通 RPC 的 30 秒期限。
+- **堆大小与快速失败：** 未指定 `RECAF_WORKER_MAX_HEAP_MB` 时，Bridge 将每个 Worker 的
+  `-XX:MaxRAMPercentage` 设为 `60 / RECAF_MAX_SESSIONS`（默认 4 个槽位时各占 JVM
+  可见内存的 15%），并启用 `-XX:+ExitOnOutOfMemoryError`。发生 OOM、就绪超时或
+  Recaf 导入致命错误（如损坏的 DEX `Unknown opcode`）时，Bridge 会立即终止该进程并返回脱敏后的根因诊断，不会误判为端口冲突重复重试。分析大型多 DEX APK 时可调高
+  `RECAF_WORKER_MAX_HEAP_MB=4096` 或 `RECAF_LAUNCH_TIMEOUT_SEC=120`。
+- **只读输入目录支持与按需自动保存：** 默认自动保存路径分配在用户可写的
+  `RECAF_AUTOSAVE_DIR` 下，因此直接打开只读目录中的样本无需手动指定 `autosave_path`。未发生内存修改的只读会话（`dirty=false`）在关闭、空闲过期或退出时不会产生冗余自动保存副本。
+- **APK 延迟按需读取与高保真保存：** APK 内的非 DEX 条目仅在调用 `read_file`
+  时按需解压。保存 APK 时仅重新编码有改动的 DEX 包，未改动的次级 DEX 与资源按原始字节直接复制，并自动对齐所有 `STORED` 条目（返回 `apk_alignment_status="aligned_16k"` 与 `native_lib_alignment_status="page_aligned_16k"` / `"no_uncompressed_so"`）；保存 JAR 时保证 `META-INF/MANIFEST.MF` 置首，原样复制未改动的类、资源、目录、时间戳与内嵌 JAR（含 Spring Boot `STORED` 模式的 `BOOT-INF/lib/*.jar`），并在发生修改时自动清理已失效签名块。会话关闭前请勿移动或修改原输入文件；保存操作享有 310 秒独立超时。
+- **槽位与取消清理：** `recaf_list` 会返回 `pending_sessions`（`state="starting"`）、
+  `occupied_slots` 与 `available_slots`。取消正在执行的 `recaf_open` 会立即清理对应
+  Worker 并释放槽位与路径预留。Bearer 令牌按进程随机生成，绝不对外暴露。
 
-`recaf_list` 还返回状态为 `starting` 的 `pending_sessions`，以及
-`occupied_slots`、`max_sessions` 和 `available_slots`。正在启动的 Worker
-尚未出现在 `sessions` 中，但已占用名额；取消打开请求会停止 Worker，释放
-名额及预留路径。
+## 工具速查
 
-每个 Worker 的 Bearer 令牌和回环端口都会独立生成。不要将令牌放入客户端配置或
-命令行参数中。
+生命周期工具不需要 `database`；其余所有工具均需传入 `recaf_open` 返回的 `database` ID。
 
-默认的 `compact` 响应配置只会改变标准文本视图：带类型的
-`structuredContent`、工具行为、结果字段、分页和错误语义均不受影响。如果 MCP
-客户端只能向模型提供文本内容，请使用 `legacy`。
-
-## 工具
-
-生命周期工具无需 `database`。其他所有工具都使用 `recaf_open` 返回的 ID。
-
-### 会话
+### 会话生命周期
 
 | 工具 | 用途 | 关键行为 |
 | --- | --- | --- |
-| `recaf_open` | 打开 JAR、APK 或 DEX | 返回 `database`、保存能力和可为空的自动保存路径 |
-| `recaf_list` | 列出已打开、正在启动的会话及容量 | 可用于安全检查安装是否正常 |
-| `set_idle_ttl` | 修改空闲超时 | `0` 表示禁用自动空闲清理 |
-| `recaf_save` | 导出 JAR/APK/DEX | 按原格式原子写入；APK 输出未签名 |
-| `recaf_close` | 关闭会话 | 省略 `save` 时保存 JAR/APK/DEX；`save=false` 丢弃 |
+| `recaf_open` | 打开 JAR、APK、DEX、ZIP 或 `.class` | 启动前快速校验绝对路径与文件魔数；返回 `database`、`output_format`、`dirty=false`、托管 `autosave_path` 及重复打开提醒 `duplicate_input_sessions` |
+| `recaf_list` | 查看活动/启动中会话与槽位 | 报告容量、`dirty` 状态、剩余空闲时间与 `save_error`，不暴露令牌 |
+| `set_idle_ttl` | 修改单会话空闲超时 | `0` 禁用自动清理；更新后重置挂起的保存重试计时 |
+| `recaf_save` | 原子导出工作区 | 输出 `MANIFEST.MF` 置首 JAR（含 `jar_signature_status`）、`aligned_16k` 未签名 APK（含 `native_lib_alignment_status` 与 `rewritten_dex_entries`）或 DEX，遵循系统 umask 并拒绝覆盖原输入文件 |
+| `recaf_close` | 关闭 Worker 会话 | 默认仅在 `dirty=true`（或 `save=true`）时保存；传入 `save=false` 丢弃改动 |
 
 ### 浏览与反编译
 
-| 工具 | 用途 | 关键选项/输出 |
+| 工具 | 用途 | 关键选项 / 输出 |
 | --- | --- | --- |
-| `workspace_info` | 汇总目标 | JVM、Android/DEX 和文件数量 |
-| `list_classes` | 列出类 | `scope`、`dex_name`、`filter`、分页 |
-| `list_files` | 列出非 class 归档条目 | Manifest、资源、配置和原生库 |
-| `read_file` | 读取归档条目 | 文本、解码后的 Android XML 或原始 Base64 |
-| `decompile_class` | 反编译单个类 | 运行时选择 `decompiler`、JVM/Android 范围、分页源码 |
-| `export_sources` | 将选定类反编译到 ZIP | `scope`、`filter`、`regex`、`decompiler`、`overwrite` |
-| `get_class_bytecode` | 读取类字节码 | 原始 JVM classfile 或重建的单类 DEX |
+| `workspace_info` | 汇总工作区资源 | JVM/Android/文件计数、逐 DEX 明细 `android_bundles` 与内嵌归档 `embedded_resources` |
+| `list_classes` | 列出内部类名 | 支持 `scope`、`dex_name`、`resource`、`include_embedded`、`filter` 与作用域提示 |
+| `list_files` | 列出非 class 归档条目 | 支持 `resource`、`include_embedded`、字节大小、类型（`android_binary_xml`、`android_arsc` 等）与字符集 |
+| `read_file` | 读取归档内单个文件 | 支持 `auto`/`text`/`base64`（含解码 `resources.arsc` 及读取多层嵌套内嵌 JAR 原始字节）、`resource`、双哈希与 `if_sha256` |
+| `write_file` | 编辑或删除主归档资源条目 | 支持 `content_text`、`content_base64`、`old_text`+`new_text`（`replace_all`）、`delete`、`expected_sha256` 与 `dry_run` |
+| `decompile_class` | 反编译单个类 | 隔离超时线程池、默认 CFR 失败自动切 Vineflower（`decompiler_fallback_from`）、Dalvik Jasm 兜底、`\uXXXX`/点分类名归一化与 `did_you_mean` |
+| `export_sources` | 批量导出反编译源码 ZIP | 原子生成含 `_recaf-mcp/manifest.json` 的 ZIP，保留 UTF-8 合法标识符文件名，默认折叠内部类（`include_inner_classes`）并将失败 Android 类兜底导出为 `.jasm` |
+| `get_class_bytecode` | 读取类字节码 | Base64 分页返回 `.class`（区分 `original_classfile` / `modified_classfile`）或重建单类 `.dex`；支持 `resource` |
 
-### 搜索与导航
+### 搜索与调用图
 
-| 工具 | 用途 | 最适合的场景 |
+| 工具 | 用途 | 适用场景 |
 | --- | --- | --- |
-| `search_strings` | 搜索常量和 DEX 字符串 | 字面量或部分正则表达式 |
-| `search_instructions` | 搜索 JVM/DEX 指令 | 快速搜索整个归档，无需反编译 |
-| `search_code` | 搜索反编译源码 | 使用 `filter` 缩小范围；超过 200 个类需明确允许 |
-| `search_members` | 查找字段/方法声明和引用 | 所有者、名称、描述符、种类和结果类型 |
-| `search_structure` | 按组合结构查找类 | 类/成员名称、访问掩码、描述符、原生 opcode |
-| `call_graph` | 查找调用方和被调用方 | 方向、深度、JVM/Android 范围 |
+| `search_strings` | 搜索常量池与 DEX 字符串 | 子串或 `regex=true` 匹配，支持 `filter`、`location_kind` 与 `resource` / `include_embedded` |
+| `search_instructions` | 搜索 JVM/DEX 字节码指令 | 推荐的全包快速搜索方式，自动兼容 `\uXXXX` 与原始 Unicode；支持 `resource` / `include_embedded` |
+| `search_code` | 搜索反编译/兜底源码行 | 支持 `filter`、`per_class_timeout_sec`、`\uXXXX`/原始 Unicode 归一化、Android Dalvik Jasm 兜底（`fallback_classes`）与 `include_embedded` |
+| `search_members` | 查找字段/方法声明与引用 | 默认 `match="exact"` 精确匹配（可选 `"contains"` / `"regex"`）与独立 `descriptor_match`；精确 `owner` 走 $O(1)$ 直查 |
+| `search_structure` | 按结构与原生 opcode 匹配类 | 原生 Recaf `ClassQuery`：访问标志、成员约束与 VM opcode 多重集；支持 `include_embedded` |
+| `call_graph` | 分析方法调用方与被调用方 | 补全 JVM 未解析外部边与内嵌 `resource` 路径；Android `invoke-super` 继承解析、正向懒遍历与反向图会话缓存（`graph_dex_scope`） |
 
-`search_structure` 直接使用 Recaf 的 JVM/DEX 结构查询引擎，无需反编译。
-例如 `{"database":"<id>","scope":"android","query":
-{"methods":[{"name":"greet","descriptor":"()V","opcodes":[26,14]}]}}`
-查找声明 `greet()V` 且包含 DEX `const-string` 与 `return-void` 的类。
-各约束按 AND 组合；opcode 数值属于所选虚拟机。字段/方法数组要求不同成员
-分别匹配，`[]` 要求没有对应成员。结果包含 `class_scope` 和 `dex_name`，
-支持 `offset`/`limit` 稳定分页。
-
-### 重命名与修改
+### 重命名、转换与字节码补丁
 
 | 工具 | 用途 | 关键行为 |
 | --- | --- | --- |
-| `rename_symbol` | 重命名类、方法或字段 | 感知描述符；支持 JVM 或 Android |
-| `apply_mappings` | 导入映射 | Enigma、Jadx、Proguard、Simple、SRG、Tiny v1/v2 |
-| `export_mappings` | 导出累计映射 | 分页 UTF-8 文本，包含数量和 SHA-256 |
-| `transform_workspace` | 运行已审核的 Recaf 转换 | 仅限 JVM；支持类型化 `options`、有序 `phases` 和 `dry_run` |
-| `patch_class` | 编译替换 Java 源码 | 仅限 JVM；默认保留 classfile 目标版本 |
-| `get_method_assembly` | 读取指定方法的准确指令 | 可编辑 JVM 或 Dalvik Jasm；支持 `scope` 和精确 `dex_name` |
-| `patch_instructions` | 汇编修改后的 JVM 或 Dalvik 方法 | 完整汇编文本加原 SHA-256；支持 `dry_run` |
+| `rename_symbol` | 重命名单个类、字段或方法 | 全层级方法分派族重命名与写后原子校验；默认拦截外部/JDK 覆盖方法（`force=true` 可强制）；自动同步 `MANIFEST.MF`、`META-INF/services/*` 与 `AndroidManifest.xml`，扫描 Mixin/模组配置引用 |
+| `apply_mappings` | 导入内联映射文本 | 支持七种映射格式（反向 ProGuard 自动返回 `direction_hint`）、自动补全级联 `Outer$Inner` 与方法分派族、`dry_run` 及清单与 `META-INF/services/*` 联动 |
+| `export_mappings` | 导出当前会话累计映射 | 七种格式无损导出（含未改名宿主类上的成员重命名），支持 `direction`（默认 `original_to_current` 或标准 ProGuard `target_to_original`）、条目统计与 SHA-256 |
+| `transform_workspace` | 运行白名单 Recaf JVM 转换 | 基于隔离快照事务执行；支持有序 `phases`、类型化 `options` 与 `dry_run` |
+| `patch_class` | 编译替换 Java 源码 | 仅限 JVM；支持外部 `classpath`、内嵌 JAR 虚拟类路径（`include_embedded_classpath`）与 `dry_run`，默认保持原 classfile 目标版本 |
+| `get_method_assembly` | 反汇编单个精确方法 | 返回可编辑的 JVM 或 Dalvik Jasm（返回规范化类名/方法名，支持 `\uXXXX` 输入反转义）；支持 `resource`（内嵌只读附带 `editable_reason`） |
+| `patch_instructions` | 汇编替换单个方法实现 | 诊断按行列消息去重，内置 ASM `BasicVerifier` + Jasm 类型门禁（`allow_unverifiable=true` 可放行）、`verification_passed`、`preview_assembly_sha256` 与原样无损短路 |
 
-`transform_workspace` 保留保守的元数据清理默认集合。新增常量/谓词/变量折叠、
-静态值/调用结果/`invokedynamic` 内联、长元数据删除、异常处理合并和变量表规范化，
-均须显式选择转换别名。通过 `options` 设置本次请求的参数，或通过 `phases`
-指定有序计划，每阶段可独立设置别名、参数及最多三轮执行。整个计划在隔离的 JVM
-快照中运行，dry-run 或任何阶段失败均不改动当前工作区。别名、参数范围、阶段结果
-和示例见 [Bridge 契约](recaf-mcp-bridge/README.md)。
+- **JVM 转换（`transform_workspace`）：** 省略 `transformers` 时默认执行保守元数据清理
+  （`duplicate_annotations`、`illegal_annotations`、`illegal_signatures`、
+  `illegal_varargs`）。显式可选别名包括：`synthetic_removal`、`unknown_attributes`、
+  `frame_removal`、`dead_code`、`goto_inlining`、`redundant_try_catch`、
+  `long_annotations`、`long_exceptions`、`duplicate_catches`、
+  `variable_table_normalization`、`opaque_constants`、`opaque_predicates`、
+  `variable_folding`、`static_value_inlining`、`call_result_inlining` 与
+  `invokedynamic_inlining`。参数范围与多阶段配置详见
+  [recaf-mcp-bridge/README.md](recaf-mcp-bridge/README.md)。
+- **Dalvik Jasm 补丁（`get_method_assembly` / `patch_instructions`）：** Jasm 3.2
+  会根据指令自动计算 Dalvik 寄存器帧大小，同时支持 `p0`/`this` 参数别名与物理
+  `vN` 寄存器。原有的行号、参数名与局部变量调试表独立保留并在汇编后重新绑定（请保留调试信息引用的标签；若精简代码缩减了局部寄存器帧，不再使用的局部变量调试项会自动裁剪）。
 
 ### 自定义 Recaf 脚本
 
 | 工具 | 用途 | 关键行为 |
 | --- | --- | --- |
-| `get_recaf_script_help` | 获取版本匹配的示例 | 工作区、ASM、服务和反混淆 |
-| `run_recaf_script` | 编译或运行 Recaf Java 代码 | 默认仅编译；执行时需要明确确认 |
+| `get_recaf_script_help` | 获取与当前版本匹配的脚本指南 | 主题：`overview`、`workspace`、`asm`、`services`、`deobfuscation` |
+| `run_recaf_script` | 编译或运行 Recaf Java 脚本 | 默认 `compile_only=true`；执行须显式设置 `acknowledge_full_worker_access=true` |
 
-安卓脚本可以遍历主资源的各个 DEX bundle，批量修改原生 DEX 树，再通过
-`bundle.put` 放回重建的 `AndroidClassInfo`。脚本改动报告同时统计主 JVM 和
-Android bundle 事件。`get_recaf_script_help` 的 `workspace` 主题提供完整的指令
-替换示例、方法 Map 遍历和 invoke-range 参数说明。修改转换后的 JVM 视图不会改变
-保存的 DEX。修改后需显式保存，APK 输出需另行签名。
+脚本在隔离的 Worker JVM 内拥有完整文件系统/网络/进程权限，且不具备事务回滚。批量修改 Android DEX 时，请遍历 `getAndroidClassBundles()` 修改原生 DEX 树（需先复制只读的 `Code.getInstructions()` 列表构造新 `Code`），再通过 `bundle.put(...)` 写回重建的 `AndroidClassInfo`；修改转换后的临时 JVM 类不会影响导出的 DEX。标准输出最后一行若为 `MCP_RESULT <json>`，会自动解析到 `script_result`。
 
-类内容修改应查看 `modified_classes` 等改动列表。`workspace_changed` 只表示当前
-工作区对象被替换或关闭，因此修改类时通常仍为 false。运行时错误会返回有长度限制的
-`runtime_error_chain` 和堆栈帧；异常链完整时另提供 `runtime_root_cause_type` /
-`runtime_root_cause_message`，用于定位根因。
+### 通用约定与格式支持矩阵
 
-### 通用行为
+- **条件读取（`if_sha256`）：** `read_file`、`decompile_class`、`export_mappings`、
+  `get_class_bytecode` 与 `get_method_assembly` 支持传入上次完整内容的哈希；若未变化则返回
+  `unchanged=true` 并省略正文。若对话上下文压缩导致旧正文丢失，请省略 `if_sha256` 重新获取。
+- **JVM 与 Android 能力对照：**
 
-| 主题 | 行为 |
-| --- | --- |
-| 匹配 | 搜索文本默认使用区分大小写的子字符串；`regex=true` 启用 Java 部分正则匹配 |
-| 结构匹配 | `search_structure` 名称默认精确匹配；嵌套的 `regex=true` 启用部分正则匹配 |
-| 范围 | 默认为 `jvm`；支持 Android 的工具接受 `android`，扫描/导出工具还接受 `all` |
-| 分页 | 类/文件列表默认返回 20 项；搜索/调用图默认 10 项；大文本/字节内容按 32 Ki 单元分页 |
-| 反编译器 | `tools/list` 公布已安装名称和默认值；经过测试的 Recaf JAR 提供 CFR、Fallback、Procyon 和 Vineflower |
-| 条件读取 | 五个大内容读取工具接受 `if_sha256`；仅在仍保留上次完整内容时使用 |
-| 上下文丢失 | 如果模型已不再持有该内容，请省略 `if_sha256` 并重试以重新获取 |
-| 响应 | `compact` 返回一份结构化结果；`legacy` 还会将完整结果复制到文本中 |
+  | 操作 | JAR / JVM | APK / DEX |
+  | --- | :---: | :---: |
+  | 浏览、搜索、结构查询、调用图 | 支持 | 支持 |
+  | 单类反编译 / 导出源码 ZIP | 支持 | 支持（经校验的 Android 转 JVM 视图） |
+  | 读取字节码 | 原始 `.class` | 重建的独立单类 `.dex` |
+  | 符号重命名 / 导入导出映射 | 支持 | 支持 |
+  | 方法级指令补丁（`patch_instructions`） | 支持（JVM Jasm） | 支持（Dalvik Jasm） |
+  | Java 源码编译替换（`patch_class`） | 支持 | 不支持 |
+  | 工作区反混淆转换（`transform_workspace`） | 支持 | 不支持 |
+  | 保存 / 重建归档 | 支持 | 支持（APK 输出未签名） |
 
-支持条件读取的工具为 `read_file`、`decompile_class`、`export_mappings`、
-`get_class_bytecode` 和 `get_method_assembly`。哈希匹配时会返回
-`unchanged=true`，但不返回正文。服务端无法判断 LLM 上下文压缩是否丢弃了调用方
-缓存的正文。
+完整的参数 schema、分页上限、超时分级与恢复机制请参阅
+[Bridge README](recaf-mcp-bridge/README.md) 与
+[Plugin README](recaf-mcp-plugin/README.md)。
 
-### JVM 与 Android 支持
+## 本地构建与开发
 
-| 操作 | JAR/JVM | APK/DEX |
-| --- | :---: | :---: |
-| 浏览、搜索、调用图 | 支持 | 支持 |
-| 反编译类/导出源码 ZIP | 支持 | 支持，通过 Android 到 JVM 转换 |
-| 读取字节码 | 原始 classfile | 重建的单类 DEX |
-| 重命名/应用映射 | 保存后持久化 | 保存后持久化 |
-| 修改 Java 源码 | 支持 | 不支持 |
-| 修改方法指令 | 支持 | 支持，可编辑 Dalvik Jasm |
-| 转换工作区 | 支持 | 不支持 |
-| 保存/重建归档 | 支持 | 支持；APK 输出未签名 |
-
-Android 导入保留紧凑编码的有符号数和浮点数、模型支持的参数名/行号/局部变量调试表，
-以及显式声明的内部类访问标志。DEX 或 APK 输出安装到目标路径前，Worker 会对照
-工作区检查类/成员集合、静态字段值和模型支持的调试表；这些检查不执行 APK。
-类重命名会更新主资源中各 DEX 的类型引用及方法/字段所属类引用。
-
-Java 源码工具使用独立且经过校验的 JVM 视图，包含数组转换修正和经过校验的备用
-转换器。源码转换不会替换 DEX 方法体。纯 Android 输入调用 `transform_workspace`
-会明确返回不支持错误。
-可编辑的 Dalvik Jasm 使用物理寄存器，原调试信息单独保留，不放入编辑文本。
-修改时需保留调试信息引用的标签；删除必要标签会在修改工作区前被拒绝。
-
-### 重要边界
-
-| 主题 | 规则 |
-| --- | --- |
-| JAR 修改 | 修改保留在内存中，直到调用 `recaf_save` 或会保存的 `recaf_close` |
-| APK/DEX 会话 | 默认关闭、空闲清理和退出时按检测到的原格式保存，自动保存扩展名为 `.apk`/`.dex`；APK 旧签名被移除，需另行签名 |
-| `read_file` | 只读取当前归档中的准确条目，绝不读取任意主机路径 |
-| `export_sources` | 要求绝对输出路径，并以原子方式安装经过验证的 ZIP |
-| Recaf 脚本 | 拥有完整的 Worker 文件系统/网络/进程权限，且不具备事务性 |
-| 大规模源码搜索 | 优先使用 `search_instructions`；超过 200 个类时，`search_code` 必须缩小范围或设置 `allow_large_scan=true` |
-
-精确的 schema、限制和恢复行为请参阅
-[桥接器 README](recaf-mcp-bridge/README.md)。插件打包和 Worker 协议详情请参阅
-[插件 README](recaf-mcp-plugin/README.md)。
-
-## 测试
+编译并校验 Java 插件 JAR 产物边界：
 
 ```bash
-cd /absolute/path/to/recaf-mcp/recaf-mcp-plugin
+cd recaf-mcp-plugin
 ./gradlew clean build
-
-cd /absolute/path/to/recaf-mcp/recaf-mcp-bridge
-uv sync --frozen
-uv run pytest -q
 ```
 
-可选启用的真实环境测试套件还会启动已安装的 Recaf Worker，覆盖打开、分析、修改、
-分页读取、保存、重新打开、取消清理、按格式处理空闲/退出清理以及带身份验证的恢复流程。
-
-在 Bridge 目录中指定通用 JAR 即可运行：
+安装锁定的 Python 环境并构建 Bridge 发行包：
 
 ```bash
-uv run --frozen python ../scripts/test_real_worker.py \
-  --recaf-jar /absolute/path/to/recaf.jar \
-  --plugin-jar ../recaf-mcp-plugin/build/libs/recaf-mcp-plugin-1.1.1.jar
+cd recaf-mcp-bridge
+uv sync --frozen
+uv build --out-dir dist
 ```
-
-运行器自动发现 Worker 身份，将输入复制到临时目录，生成小型多 DEX APK 和裸
-DEX 及可执行 JVM 转换测试样本，并清理 Worker。可选的参考
-APK 和大型 JAR 测试仍需通过 `RECAF_MCP_TEST_ANDROID_INPUT` 和
-`RECAF_MCP_TEST_REFERENCE_INPUT` 提供样本。CI 在 PR、main 推送和版本标签推送时
-运行 Linux/Windows 单元测试及 Linux 真实 Worker 测试；通用运行时从
-`build.gradle` 锁定的提交构建。独立的每周/手动兼容性工作流检查上游 `master`，
-发布仍仅在版本标签推送时进行。
 
 ## 故障排除
 
-- **客户端报告 MCP 启动失败：** 确认 `recaf-mcp-bridge` 位于客户端的 `PATH`
-  中，确认 `RECAF_JAR` 指向体积较大的通用可执行 JAR，确认只安装了一个 MCP
-  插件，并允许本地回环套接字。
-- **首次发现工具超时：** 第一次目录请求会启动一个短生命周期的 schema Worker。
-  将客户端启动超时提高到 120 秒。
-- **在 MCP 客户端中批量导出源码超时：** Worker 允许最长 1,800 秒，因此请将客户端
-  工具超时设置为至少 1,840 秒，或缩小 `filter`/`scope`。取消或失败的导出绝不会
-  安装不完整的目标 ZIP。
-- **`patch_class` 报告没有编译器：** 将 `RECAF_JAVA_COMMAND` 指向 JDK，而不是
-  JRE。
-- **`patch_class` 拒绝旧版 classfile：** 默认的 `preserve` 策略绝不会悄悄改变
-  运行时兼容性。只有在可以接受将生成的 classfile 提升到当前 javac 最低版本时，
-  才使用 `target_version_policy="minimum_supported"` 重试；结果会报告修改前后的
-  版本以及是否发生升级。
-- **加载了意外的 Recaf 插件/配置：** 绝不要使用用户的普通 Recaf 数据目录启动。
-  桥接器始终创建私有目录；正常使用时应通过桥接器启动，而不是手动启动 Worker。
-- **协议解析错误：** 确保客户端没有将桥接器的 stderr 合并到 stdout。
+- **客户端报告 MCP 启动失败：** 检查 `recaf-mcp-bridge` 是否在客户端 `PATH` 中、
+  `RECAF_JAR` 是否指向 Recaf 4 通用可执行 JAR、插件目录中是否只有一个
+  `recaf-mcp-plugin*.jar`，并确认允许本地 `127.0.0.1` 回环端口通信。
+- **首次发现工具超时：** 首次 `tools/list` 会启动短生命周期的 schema Worker，请将客户端启动超时调至 `120s` 以上。
+- **批量导出源码超时：** 将客户端工具超时设为至少 `1840s`，或通过 `filter` / `scope`
+  缩小导出范围。取消或失败的导出不会留下残缺的目标 ZIP。
+- **`patch_class` 报错缺少编译器或旧版字节码不兼容：** 将 `RECAF_JAVA_COMMAND` 指向完整
+  JDK（而非 JRE）。若旧类版本低于当前 `javac` 支持的最低目标版本，仅在允许提升该类字节码版本时传入
+  `target_version_policy="minimum_supported"`。
+- **Stdio 协议解析错误：** 确保客户端未将 Bridge 的 `stderr` 合并到 `stdout`。
 
 ## 许可证
 
-本项目采用 [MIT 许可证](LICENSE)。
+本项目基于 [MIT 许可证](LICENSE) 开源。

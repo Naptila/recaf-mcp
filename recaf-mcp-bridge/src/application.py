@@ -85,7 +85,9 @@ class BridgeToolService:
     ) -> None:
         self._config = config.validate()
         self._sessions = sessions or SessionManager(config.max_sessions)
-        self._reservations = reservations or PathReservations()
+        self._reservations = reservations or PathReservations(
+            config.effective_autosave_dir
+        )
         self._discovery = discovery or SchemaWorkerDiscovery(config)
         self._rpc_client = rpc_client or WorkerRpcClient()
         self._recovery_registry = recovery_registry or RecoveryRegistry(
@@ -155,11 +157,6 @@ class BridgeToolService:
             return await self._save(arguments)
         if name == "recaf_close":
             return await self._close(arguments)
-        if name in {tool.name for tool in LIFECYCLE_TOOLS}:
-            return _error_result(
-                f"{name} is not implemented yet",
-                "not_implemented",
-            )
         if name in self._worker_names:
             assert self._proxy is not None
             return await self._proxy.call(name, arguments)
@@ -245,15 +242,48 @@ class BridgeToolService:
             )
         except KeyError:
             return _error_result("input_path is required", "invalid_params")
+        except SessionCapacityError as error:
+            now = time.monotonic()
+            snapshot = await self._sessions.snapshot_state()
+            active_sessions = [
+                {
+                    "database": item.sid,
+                    "input_path": str(item.input_path),
+                    "dirty": item.dirty,
+                    "busy": item.busy_count > 0,
+                    "idle_remaining_sec": (
+                        None
+                        if item.idle_ttl_sec == 0
+                        else max(0.0, item.idle_ttl_sec - (now - item.last_touched))
+                    ),
+                }
+                for item in snapshot.sessions
+            ]
+            bounded = str(error)[:1000]
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=bounded)],
+                structuredContent={
+                    "error": "open_failed",
+                    "message": bounded,
+                    "max_sessions": snapshot.max_sessions,
+                    "occupied_slots": snapshot.occupied_slots,
+                    "active_sessions": active_sessions,
+                },
+                isError=True,
+            )
         except (
             OSError,
             PathReservationError,
-            SessionCapacityError,
             ValueError,
             WorkerLaunchError,
         ) as error:
             return _error_result(str(error), "open_failed")
-        structured = {
+        duplicate_sids = sorted(
+            item.sid
+            for item in await self._sessions.snapshot()
+            if item.sid != session.sid and item.input_path == session.input_path
+        )
+        structured: dict[str, Any] = {
             "database": session.sid,
             "state": session.state,
             "input_path": str(session.input_path),
@@ -266,14 +296,24 @@ class BridgeToolService:
             "workspace_archive_export_supported": (
                 session.autosave_path is not None
             ),
+            "dirty": session.dirty,
             "port": session.port,
             "idle_ttl_sec": session.idle_ttl_sec,
         }
+        open_message = f"Opened {session.input_path.name} as {session.sid}."
+        if duplicate_sids:
+            structured["duplicate_input_sessions"] = duplicate_sids
+            structured["warning"] = (
+                "The same input_path is already open in session(s) "
+                + ", ".join(duplicate_sids)
+                + "; reuse an existing database ID unless isolated sessions are intended."
+            )
+            open_message += f" Warning: already open in {', '.join(duplicate_sids)}."
         return types.CallToolResult(
             content=[
                 types.TextContent(
                     type="text",
-                    text=f"Opened {session.input_path.name} as {session.sid}.",
+                    text=open_message,
                 )
             ],
             structuredContent=structured,
@@ -362,7 +402,10 @@ class BridgeToolService:
         if session is None:
             return _error_result("unknown Recaf session", "unknown_database")
         save = (
-            session.autosave_path is not None
+            (
+                session.autosave_path is not None
+                and (session.dirty or arguments.get("output_path") is not None)
+            )
             if requested_save is None
             else requested_save
         )
@@ -556,6 +599,7 @@ class BridgeToolService:
             except WorkerRpcError as error:
                 raise SaveWorkspaceError(str(error)) from error
             saved = self._validate_save_result(result, destination)
+            session.dirty = False
             session.save_error = None
             session.save_failure_count = 0
             session.retry_after = 0.0
@@ -598,6 +642,39 @@ class BridgeToolService:
             if signature != expected_signature:
                 raise SaveWorkspaceError("Worker save result has invalid APK signature status")
             metadata.update(format=output_format, apk_signature_status=signature)
+            alignment = result.get("apk_alignment_status")
+            if alignment is not None:
+                if not isinstance(alignment, str):
+                    raise SaveWorkspaceError("Worker save result has invalid APK alignment status")
+                metadata["apk_alignment_status"] = alignment
+            native_alignment = result.get("native_lib_alignment_status")
+            if native_alignment is not None:
+                if not isinstance(native_alignment, str):
+                    raise SaveWorkspaceError(
+                        "Worker save result has invalid native library alignment status"
+                    )
+                metadata["native_lib_alignment_status"] = native_alignment
+            jar_signature = result.get("jar_signature_status")
+            if jar_signature is not None:
+                if not isinstance(jar_signature, str):
+                    raise SaveWorkspaceError(
+                        "Worker save result has invalid JAR signature status"
+                    )
+                metadata["jar_signature_status"] = jar_signature
+            rewritten_dex = result.get("rewritten_dex_entries")
+            if rewritten_dex is not None:
+                if not isinstance(rewritten_dex, list):
+                    raise SaveWorkspaceError(
+                        "Worker save result has invalid rewritten DEX entries"
+                    )
+                metadata["rewritten_dex_entries"] = rewritten_dex
+            unchanged_dex = result.get("unchanged_dex_entries")
+            if unchanged_dex is not None:
+                if not isinstance(unchanged_dex, list):
+                    raise SaveWorkspaceError(
+                        "Worker save result has invalid unchanged DEX entries"
+                    )
+                metadata["unchanged_dex_entries"] = unchanged_dex
         return metadata
 
     @staticmethod
@@ -656,7 +733,7 @@ class BridgeToolService:
         if claimed is None:
             return None
 
-        discard_only = claimed.autosave_path is None
+        discard_only = claimed.autosave_path is None or not claimed.dirty
         completed = False
         failure: str | None = None
         with anyio.move_on_after(30) as drain_scope:
@@ -723,8 +800,8 @@ class BridgeToolService:
         return session.process.returncode is not None, warning
 
     async def _expire_idle_locked(self, session: Session) -> None:
-        """Persist savable sessions, then request shutdown while locked."""
-        if session.autosave_path is not None:
+        """Persist dirty savable sessions, then request shutdown while locked."""
+        if session.autosave_path is not None and session.dirty:
             await self._save_locked(session, output_path=None, overwrite=False)
         await self._shutdown_locked(session)
 
@@ -769,6 +846,7 @@ class BridgeToolService:
             "idle_ttl_sec": session.idle_ttl_sec,
             "idle_remaining_sec": idle_remaining,
             "busy": session.busy_count > 0,
+            "dirty": session.dirty,
             "save_error": session.save_error,
         }
 

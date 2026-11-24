@@ -48,6 +48,14 @@ def _render_structured_content(tool_name: str, structured: dict[str, Any]) -> st
     ):
         metadata = dict(structured)
         source = metadata.pop("source")
+        if (
+            metadata.get("result_type") == "fallback"
+            or metadata.get("decompilation_input") == "dalvik_jasm_fallback"
+        ):
+            return (
+                f"{_FALLBACK_HEADING}\n{_compact_json(metadata)}\n\n"
+                f"Dalvik Jasm fallback:\n```jasm\n{source}\n```"
+            )
         return (
             f"{_FALLBACK_HEADING}\n{_compact_json(metadata)}\n\n"
             f"Decompiled Java source:\n```java\n{source}\n```"
@@ -58,18 +66,9 @@ def _render_structured_content(tool_name: str, structured: dict[str, Any]) -> st
     ):
         metadata = dict(structured)
         assembly = metadata.pop("assembly")
-        android = metadata.get("assembly_format") == (
-            "android_dex_method_disassembly"
-        )
-        heading = (
-            "Read-only Android DEX method disassembly"
-            if android
-            else "Complete Recaf method assembly"
-        )
-        language = "text" if android else "jasm"
         return (
             f"{_FALLBACK_HEADING}\n{_compact_json(metadata)}\n\n"
-            f"{heading}:\n```{language}\n{assembly}\n```"
+            f"Complete Recaf method assembly:\n```jasm\n{assembly}\n```"
         )
     if tool_name == "read_file" and isinstance(
         structured.get("content_text"),

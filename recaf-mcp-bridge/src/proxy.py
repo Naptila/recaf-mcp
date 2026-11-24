@@ -40,6 +40,43 @@ _OUTPUT_PATH_TOOLS = frozenset({"export_sources"})
 _LONG_RUNNING_TOOL_TIMEOUTS = {"export_sources": 1810.0}
 
 
+def _did_mutate_workspace(name: str, result: types.CallToolResult) -> bool:
+    """Return True when a Worker tool call mutated workspace state in memory."""
+    structured = (
+        result.structuredContent
+        if isinstance(result.structuredContent, dict)
+        else {}
+    )
+    if name == "run_recaf_script":
+        if (
+            structured.get("changed_class_count", 0) > 0
+            or structured.get("workspace_changed") is True
+        ):
+            return True
+        return (
+            not result.isError
+            and structured.get("executed") is True
+            and structured.get("save_required") is True
+        )
+    if result.isError:
+        return False
+    if name == "rename_symbol":
+        return (
+            structured.get("workspace_mutated_in_memory") is True
+            or structured.get("changed_classes", 0) > 0
+        )
+    if name in {
+        "apply_mappings",
+        "patch_instructions",
+        "transform_workspace",
+        "write_file",
+    }:
+        return structured.get("applied") is True
+    if name == "patch_class":
+        return structured.get("applied", True) is True
+    return False
+
+
 class WorkerToolProxy:
     """Route only discovered tool names to their selected ready Worker."""
 
@@ -116,7 +153,7 @@ class WorkerToolProxy:
                     reserved_output = canonical_output
                     forwarded["output_path"] = str(reserved_output)
                 try:
-                    return await self._rpc_client.call_tool(
+                    result = await self._rpc_client.call_tool(
                         session.port,
                         session.token,
                         name,
@@ -124,6 +161,9 @@ class WorkerToolProxy:
                         operation_id=operation_id,
                         timeout_sec=_LONG_RUNNING_TOOL_TIMEOUTS.get(name, 310.0),
                     )
+                    if _did_mutate_workspace(name, result):
+                        session.dirty = True
+                    return result
                 finally:
                     if reserved_output is not None:
                         with anyio.CancelScope(shield=True):

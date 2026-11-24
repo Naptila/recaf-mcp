@@ -52,6 +52,7 @@ class Session:
     closing: bool = False
     state: Literal["starting", "ready", "closing", "dead"] = "starting"
     output_format: str | None = "jar"
+    dirty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +201,8 @@ class SessionManager:
 class PathReservations:
     """Prevent autosaves from overwriting inputs or another session's target."""
 
-    def __init__(self) -> None:
+    def __init__(self, default_autosave_dir: Path | None = None) -> None:
+        self._default_autosave_dir = default_autosave_dir
         self._inputs: dict[str, Path] = {}
         self._targets: dict[Path, str] = {}
         self._managed_targets: dict[str, Path] = {}
@@ -208,8 +210,11 @@ class PathReservations:
 
     @staticmethod
     def _canonical_input(input_path: str | Path) -> Path:
+        raw = Path(input_path).expanduser()
+        if not raw.is_absolute():
+            raise PathReservationError("input_path must be an absolute path")
         try:
-            canonical = Path(input_path).expanduser().resolve(strict=True)
+            canonical = raw.resolve(strict=True)
         except (OSError, RuntimeError) as error:
             raise PathReservationError("input path does not exist") from error
         if not canonical.is_file():
@@ -219,26 +224,32 @@ class PathReservations:
         return canonical
 
     @staticmethod
-    def _canonical_output(output_path: Path) -> Path:
+    def _canonical_output(
+        output_path: Path,
+        *,
+        label: str = "autosave",
+    ) -> Path:
         try:
             parent = output_path.parent.expanduser().resolve(strict=True)
         except (OSError, RuntimeError) as error:
-            raise PathReservationError("autosave parent does not exist") from error
+            raise PathReservationError(f"{label} parent does not exist") from error
         if not parent.is_dir():
-            raise PathReservationError("autosave parent is not a directory")
+            raise PathReservationError(f"{label} parent is not a directory")
         if not os.access(parent, os.W_OK):
-            raise PathReservationError("autosave parent is not writable")
+            raise PathReservationError(f"{label} parent is not writable")
         candidate = parent / output_path.name
         try:
             return candidate.resolve(strict=candidate.exists())
         except (OSError, RuntimeError) as error:
-            raise PathReservationError("autosave path cannot be resolved") from error
+            raise PathReservationError(f"{label} path cannot be resolved") from error
 
     async def reserve(
         self,
         sid: str,
         input_path: str | Path,
         autosave_path: str | Path | None = None,
+        *,
+        default_autosave_dir: Path | None = None,
     ) -> ReservedPaths:
         """Validate and reserve canonical paths for a pending session."""
         canonical_input = self._canonical_input(input_path)
@@ -246,7 +257,21 @@ class PathReservations:
             default_name = (
                 f"{canonical_input.stem}.recaf-autosave-{sid}.jar"
             )
-            requested_output = canonical_input.with_name(default_name)
+            base_dir = default_autosave_dir or self._default_autosave_dir
+            if base_dir is not None:
+                try:
+                    base_dir.expanduser().mkdir(
+                        parents=True,
+                        mode=0o700,
+                        exist_ok=True,
+                    )
+                except OSError as error:
+                    raise PathReservationError(
+                        "default autosave directory cannot be created"
+                    ) from error
+                requested_output = base_dir / default_name
+            else:
+                requested_output = canonical_input.with_name(default_name)
         else:
             requested_output = Path(autosave_path).expanduser()
             if not requested_output.is_absolute():
@@ -284,7 +309,7 @@ class PathReservations:
         requested_output = Path(output_path).expanduser()
         if not requested_output.is_absolute():
             raise PathReservationError("output path must be absolute")
-        canonical_output = self._canonical_output(requested_output)
+        canonical_output = self._canonical_output(requested_output, label="output")
         async with self._lock:
             input_path = self._inputs.get(sid)
             if input_path is None:
@@ -321,8 +346,12 @@ class PathReservations:
             raise PathReservationError("unsupported output format")
         async with self._lock:
             input_path = self._inputs[sid]
+            managed_current = self._managed_targets[sid]
         destination = await self.reserve_output(
-            sid, input_path.with_name(f"{input_path.stem}.recaf-autosave-{sid}.{output_format}"),
+            sid,
+            managed_current.with_name(
+                f"{input_path.stem}.recaf-autosave-{sid}.{output_format}"
+            ),
         )
         async with self._lock:
             previous = self._managed_targets[sid]

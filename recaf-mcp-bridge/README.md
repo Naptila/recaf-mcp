@@ -18,7 +18,7 @@ Python 3.11 or newer and `uv` are required. Install the cross-platform wheel
 directly from GitHub without a checkout or local build:
 
 ```bash
-uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.1.1/recaf_mcp_bridge-1.1.1-py3-none-any.whl
+uv tool install https://github.com/Naptila/recaf-mcp/releases/download/v1.2.0/recaf_mcp_bridge-1.2.0-py3-none-any.whl
 ```
 
 To install from a local source checkout instead:
@@ -28,7 +28,7 @@ uv tool install ./recaf-mcp-bridge
 ```
 
 Runtime dependencies have major-version upper bounds. The committed `uv.lock`
-pins the development and test environment; a local tool install resolves the
+pins the development environment; a local tool install resolves the
 declared compatible ranges. In particular, the MCP SDK remains on the
 supported 1.x low-level API with `mcp>=1.27,<2`.
 
@@ -42,11 +42,11 @@ Standard output is reserved exclusively for newline-delimited MCP protocol
 frames. Diagnostics are written to standard error. Closing the client input
 stream ends the Bridge process cleanly.
 
-For development and tests, create the locked project environment instead:
+For local development, create the locked project environment instead:
 
 ```bash
 uv sync --frozen
-uv run pytest -q
+uv run recaf-mcp-bridge --stdio
 ```
 
 The Bridge exposes five lifecycle schemas plus the schemas discovered from the
@@ -64,13 +64,14 @@ MCP plugin:
 RECAF_JAR=/absolute/path/to/recaf.jar
 RECAF_PLUGIN_JAR=/optional/exact/recaf-mcp-plugin.jar
 RECAF_PLUGIN_DIR=/optional/plugin/discovery/directory
-RECAF_MAX_SESSIONS=2
+RECAF_MAX_SESSIONS=4
 # Optional fixed heap limit; omit to share 60% of JVM-visible RAM across slots.
 RECAF_WORKER_MAX_HEAP_MB=4096
 RECAF_IDLE_TTL_SEC=600
 RECAF_RESPONSE_PROFILE=compact
 RECAF_LAUNCH_TIMEOUT_SEC=60
 RECAF_SESSION_ROOT=/optional/owner-only/session/directory
+RECAF_AUTOSAVE_DIR=/optional/owner-only/autosave/directory
 RECAF_RECOVERY_DIR=/optional/owner-only/recovery/directory
 ```
 
@@ -94,9 +95,10 @@ Terminal Recaf workspace import and plugin initialization failures stop the
 Worker and return the cause immediately, including DEX `Unknown opcode` errors,
 without waiting for the readiness timeout.
 
-Without `RECAF_RECOVERY_DIR`, the Bridge uses
-`$XDG_STATE_HOME/recaf-mcp/recovery`, falling back to
-`~/.local/state/recaf-mcp/recovery`.
+Without `RECAF_AUTOSAVE_DIR` or `RECAF_RECOVERY_DIR`, the Bridge uses
+`$XDG_STATE_HOME/recaf-mcp/autosave` and `$XDG_STATE_HOME/recaf-mcp/recovery`
+(falling back to `~/.local/state/recaf-mcp/...`), so opening inputs inside
+read-only directories succeeds without supplying an explicit `autosave_path`.
 
 When neither plugin override is set, the Bridge finds exactly one
 `recaf-mcp-plugin*.jar` in Recaf's standard user plugin directory. It honors
@@ -128,19 +130,28 @@ The lifecycle and routed analysis flow is connected end to end:
   through 604800 seconds, touches the session, and resets a pending watchdog
   retry schedule.
 - `recaf_save(database, output_path?, overwrite=false)` serializes with routed
-  operations and atomically exports a supported JAR/APK/DEX primary resource. The
-  managed autosave can be replaced by its owner; a user-selected existing
-  target requires `overwrite=true`. Results include `format` and
-  `apk_signature_status` (`unsigned` for APK, `not_applicable` otherwise).
+  operations and atomically exports a supported JAR/APK/DEX primary resource,
+  clearing `dirty=false` on success. The managed autosave can be replaced by its
+  owner; a user-selected existing target requires `overwrite=true`. Results
+  include `format`, `jar_signature_status` (`removed`, `preserved`, or
+  `unsigned` for JAR; `not_applicable` otherwise), `apk_signature_status`
+  (`unsigned` for APK, `not_applicable` otherwise), `apk_alignment_status`
+  (`aligned_16k` for APK, `not_applicable` otherwise),
+  `native_lib_alignment_status` (`page_aligned_16k` / `no_uncompressed_so` for
+  APK, `not_applicable` otherwise), and `rewritten_dex_entries` /
+  `unchanged_dex_entries` for APK/DEX saves.
 - Worker-owned `workspace_info(database)`, `list_classes(database, ...)`,
   `list_files(database, ...)`, `read_file(database, ...)`, and
   `decompile_class(database, ...)`, plus bulk source export, search, rename,
   and mapping tools, route through a generic allowlist proxy to the selected
-  ready session.
-- `recaf_close(database, save?, output_path?)` uses a format-aware default:
-  JAR/APK/DEX sessions save before shutdown. APK output is unsigned. If a save
-  fails or is interrupted, the session returns to `ready` with `save_error`
-  exposed by `recaf_list`, so the caller can retry.
+  ready session and mark `dirty=true` when workspace state is mutated.
+- `recaf_close(database, save?, output_path?)` uses a dirty-aware default:
+  sessions with in-memory mutations (`dirty=true`, or when `save=true` /
+  `output_path` is passed explicitly) save before shutdown, while read-only
+  sessions (`dirty=false`) close cleanly without writing an autosave copy. APK
+  output is unsigned and 4-byte/16-KiB aligned. If a save fails or is
+  interrupted, the session returns to `ready` with `save_error` exposed by
+  `recaf_list`, so the caller can retry.
 - `recaf_close(database, save=false)` is the explicit discard path. It drains
   the session operation lock, requests graceful Worker shutdown, escalates the
   owned process group when needed, and releases capacity and path reservations.
@@ -150,7 +161,9 @@ Worker schema, then removes it before forwarding. Worker-owned base schemas
 remain routing-neutral, and internal methods such as health, save, and shutdown
 cannot pass through the generic proxy. Text content, structured content, and
 `isError` are preserved. MCP clients that do not expose `structuredContent` to
-the model can set `RECAF_RESPONSE_PROFILE=legacy`; that profile mirrors every
+the model, including Antigravity's `call_mcp_tool`, must set
+`RECAF_RESPONSE_PROFILE=legacy` in the MCP server environment and restart the
+connection to receive complete results as text. That profile mirrors every
 nonempty structured result into a second standard text `content` block as
 compact JSON. Decompiled source and script stdout remain fenced, while script
 guides remain Markdown. The default `compact` profile returns only the
@@ -267,16 +280,16 @@ workspace `resources.arsc`, and Recaf cache as the GUI. Callers may force
 forcing text on unsupported binary data returns an actionable error. Results
 use `decoded` and `text_source` to distinguish decoded AXML from native text.
 Text offsets are characters and binary offsets are bytes, explicitly reported
-by `offset_unit`; pages are capped at 512 KiB-equivalent units. Results include
-complete raw byte size, raw SHA-256, returned count, and nullable
-`next_offset`. Under the `legacy` profile, text-only MCP clients receive text
-content in a separate code fence rather than JSON-escaped inline. The path is
-resolved only inside the open workspace and never against the Worker's
-filesystem.
+by `offset_unit`; pages are capped at 512 KiB-equivalent units. Results include complete raw byte size, `raw_sha256`, `content_sha256` (when
+text is returned), `sha256` matching the selected output representation
+(`content_sha256` for `text`, `raw_sha256` for `base64`), returned count, and
+nullable `next_offset`. Under the `legacy` profile, text-only MCP clients
+receive text content in a separate code fence rather than JSON-escaped inline.
+The path is resolved only inside the open workspace (or optional embedded
+`resource`) and never against the Worker's filesystem.
 
-The returned `sha256` always describes the complete raw archive bytes. Passing
-it back as `if_sha256` returns `unchanged=true` plus file/format/size/hash
-metadata without decoding or returning `content_text`/`content_base64`.
+Passing the returned `sha256` back as `if_sha256` returns `unchanged=true` plus
+file/format/size/hash metadata without returning `content_text`/`content_base64`.
 
 `decompile_class(database, class_name, decompiler?, scope="jvm", dex_name?,
 offset=0, limit=32768, if_sha256?)` resolves an exact primary JVM or Android
@@ -376,7 +389,7 @@ return `total`, `returned`, and nullable `next_offset`. Collection stops at
 20,000 hits and reports `collection_truncated` if that global safety cap is
 reached.
 
-`search_members(database, owner?, name?, descriptor?, regex=false,
+`search_members(database, owner?, name?, descriptor?, match="exact", regex=false,
 kind="any", results="both", filter?, scope="jvm", dex_name?, offset=0,
 limit=10)` delegates to
 Recaf's member `DeclarationQuery` and `ReferenceQuery`. At least one of owner,
@@ -384,9 +397,9 @@ name, or descriptor is required at runtime; the schema intentionally keeps all
 three as ordinary optional properties instead of a top-level `anyOf`, because
 several MCP clients otherwise collapse the typed signature. Omitted selectors
 match any value. Supplied
-selectors use the same matching contract as the other search tools: a
-case-sensitive literal substring by default, or a partial Java regex when
-`regex=true`. The one regex flag applies to every supplied selector. `kind`
+selectors default to exact identity matching (`match="exact"`), or support
+substring matching via `match="contains"` and partial Java regex via
+`match="regex"` / `regex=true`. `kind`
 selects `field`, `method`, or `any`, while `results` selects `declarations`,
 `references`, or `both`. When both are requested, Recaf composes the two
 queries and scans the selected primary JVM and/or Android classes once. The
@@ -447,8 +460,8 @@ rewrites those definitions and references without cloning every class in a
 large APK. The result reports JVM/Android changed-class counts and DEX identity.
 Malformed shapes, absent targets, target conflicts, and no-op names are tool or
 argument errors and leave the workspace unchanged until a valid mapping is
-applied. Android results explicitly report `in_memory_only=true` and
-`save_required=false`.
+applied. File-backed APK and DEX sessions report `save_required=true` and
+`in_memory_only=false`, persisting renames through `recaf_save` or saving `recaf_close`.
 
 `apply_mappings(database, format, mappings, unique_keys=false, dry_run=false,
 scope="jvm", offset=0, limit=100)` parses inline mapping text with Recaf and
@@ -537,7 +550,7 @@ max_passes=1, dry_run=false, offset=0, limit=100)` runs only reviewed Recaf JVM 
 aliases. Omitting `transformers` selects the conservative
 `duplicate_annotations`, `illegal_annotations`, `illegal_signatures`, and
 `illegal_varargs` metadata cleanup set. Optional allowlisted transforms are
-`unknown_attributes`, `frame_removal`, `dead_code`, `goto_inlining`,
+`synthetic_removal`, `unknown_attributes`, `frame_removal`, `dead_code`, `goto_inlining`,
 `redundant_try_catch`, `long_annotations`, `long_exceptions`, `duplicate_catches`,
 `variable_table_normalization`, `opaque_constants`, `opaque_predicates`,
 `variable_folding`, `static_value_inlining`, `call_result_inlining`, and
@@ -674,7 +687,7 @@ Captured `System.out` is capped at 256 KiB; a final single-line
 `MCP_RESULT <json>` value is also returned as `script_result`. Primary ordinary
 JVM and primary Android bundle additions, updates, and removals are reported as
 a stable page of at most 200 sorted, unique changed class names. The response
-uses `change_observation_scope="primary_jvm_and_android_bundle_events"`; it
+uses `change_observation_scope="primary_and_embedded_bundle_events"`; it
 observes bundles present at script startup and requires `bundle.put` for direct
 tree edits. The original current workspace is restored if the script replaces it.
 `workspace_changed` reports replacement or closure of the current workspace object,
@@ -719,43 +732,3 @@ may appear earlier in `runtime_error_chain`):
 ```json
 {"runtime_root_cause_type":"java.lang.IllegalArgumentException","runtime_root_cause_message":"invalid DEX operand","runtime_error_chain_truncated":false}
 ```
-
-## Test
-
-```bash
-uv run pytest -q
-```
-
-The suite uses the official in-memory reference client and a real stdio
-subprocess to verify initialization, stable repeated `tools/list`, structured
-`tools/call`, stdout purity, and shutdown on EOF.
-
-The installed-Recaf integration tests are opt-in. Set
-`RECAF_MCP_TEST_RECAF_JAR`, `RECAF_MCP_TEST_PLUGIN_JAR`, `RECAF_MCP_TEST_INPUT`,
-`RECAF_MCP_TEST_PLUGIN_BUILD`, and `RECAF_MCP_TEST_SCHEMA_FINGERPRINT` to run it
-with the regular pytest command. They verify both the raw launcher and the full
-MCP `tools/list` → `recaf_open` → routed analysis/mutation → atomic save/default
-close → reopen flow, including progress notifications, source/bytecode page
-reconstruction, a descriptor-aware method rename with updated call sites,
-occupied-output failure/retry, and real one-second-TTL automatic JAR
-autosave/termination behavior. They also cover failed-save recovery across
-Bridge instances and real SIGTERM save/cleanup with stdin still open.
-
-Set `RECAF_MCP_TEST_REFERENCE_INPUT` as well to enable the optional large-JAR
-generic script test. It performs a read-only ASM inventory through
-`run_recaf_script`; the Worker implementation contains no knowledge of the
-reference JAR's obfuscation pattern.
-
-Set `RECAF_MCP_TEST_ANDROID_INPUT` to the reference APK to enable the optional
-Android analysis and mapping suite. It verifies generic file listing/manifest reading,
-scope schemas, multi-DEX
-identity, Android-to-JVM source decompilation, reconstructed single-class DEX
-bytes, native DEX instruction search/disassembly, a full-APK call-graph index,
-Android source/string/member searches, in-memory method/class renames, all
-seven mapping-text exports, and default close saving an unsigned APK.
-The reusable `scripts/test_real_worker.py` runner also generates multi-DEX APK,
-raw DEX, and runnable JVM fixtures. It verifies editable Dalvik round trips,
-structural searches, each expanded transformer alias, phased dry-run/apply,
-save/reopen, unchanged non-target content, and equal program output before
-and after JVM transformation. Set `RECAF_MCP_TEST_GENERATED_ANDROID_DIR` or
-`RECAF_MCP_TEST_GENERATED_JVM_JAR` when running these tests directly.

@@ -96,8 +96,9 @@ class BridgeConfig:
     plugin_jar: Path
     session_root: Path
     recovery_dir: Path | None = None
+    autosave_dir: Path | None = None
     java_command: str = "java"
-    max_sessions: int = 2
+    max_sessions: int = 4
     worker_max_heap_mb: int | None = None
     default_idle_ttl_sec: int = 600
     response_profile: str = "compact"
@@ -126,6 +127,13 @@ class BridgeConfig:
         if self.recovery_dir is not None:
             return self.recovery_dir
         return (self.session_root.parent / "recovery").resolve(strict=False)
+
+    @property
+    def effective_autosave_dir(self) -> Path:
+        """Return the explicit autosave directory or a session-parent fallback."""
+        if self.autosave_dir is not None:
+            return self.autosave_dir
+        return (self.session_root.parent / "autosave").resolve(strict=False)
 
     def validate(self) -> "BridgeConfig":
         """Return this configuration after validating launch-critical paths."""
@@ -165,6 +173,8 @@ class BridgeConfig:
             raise ValueError("RECAF_PLUGIN_JAR contains the wrong plugin service")
         if not self.effective_recovery_dir.is_absolute():
             raise ValueError("recovery directory must be absolute")
+        if not self.effective_autosave_dir.is_absolute():
+            raise ValueError("autosave directory must be absolute")
         if not self.java_command:
             raise ValueError("RECAF_JAVA_COMMAND must not be empty")
         if not 1 <= self.max_sessions <= 32:
@@ -208,17 +218,25 @@ class BridgeConfig:
                 / "sessions"
             ).resolve(strict=False)
 
+        state_home = env.get("XDG_STATE_HOME")
+        state_root = (
+            Path(state_home).expanduser()
+            if state_home
+            else Path.home() / ".local" / "state"
+        )
         recovery_value = env.get("RECAF_RECOVERY_DIR")
         if recovery_value:
             recovery_dir = Path(recovery_value).expanduser().resolve(strict=False)
         else:
-            state_home = env.get("XDG_STATE_HOME")
-            state_root = (
-                Path(state_home).expanduser()
-                if state_home
-                else Path.home() / ".local" / "state"
-            )
             recovery_dir = (state_root / "recaf-mcp" / "recovery").resolve(
+                strict=False
+            )
+
+        autosave_value = env.get("RECAF_AUTOSAVE_DIR")
+        if autosave_value:
+            autosave_dir = Path(autosave_value).expanduser().resolve(strict=False)
+        else:
+            autosave_dir = (state_root / "recaf-mcp" / "autosave").resolve(
                 strict=False
             )
 
@@ -227,9 +245,10 @@ class BridgeConfig:
             plugin_jar=plugin_jar,
             session_root=session_root,
             recovery_dir=recovery_dir,
+            autosave_dir=autosave_dir,
             java_command=env.get("RECAF_JAVA_COMMAND", "java"),
             max_sessions=_bounded_int(
-                env, "RECAF_MAX_SESSIONS", 2, minimum=1, maximum=32
+                env, "RECAF_MAX_SESSIONS", 4, minimum=1, maximum=32
             ),
             worker_max_heap_mb=(
                 _bounded_int(

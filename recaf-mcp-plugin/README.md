@@ -8,22 +8,21 @@ Worker runtime distribution is required.
 See the [root README](../README.md) for installation, MCP client configuration,
 and the normal Bridge-managed workflow.
 
-## Build and test
+## Build
 
 JDK 25 and the checked-in Gradle 9.4.1 wrapper are used. Production classes
 target Java 22.
 
 ```bash
 ./gradlew clean build
-./gradlew test
 ./gradlew -q javaToolchains
 ```
 
-`build` runs JUnit 5 and verifies the plugin service entry and dependency
+`build` compiles the plugin and verifies the plugin service entry and dependency
 boundaries. Its production output is:
 
 ```text
-build/libs/recaf-mcp-plugin-1.1.1.jar
+build/libs/recaf-mcp-plugin-1.2.0.jar
 ```
 
 The build checks the service entry and verifies that the plugin does not shade
@@ -31,11 +30,6 @@ Recaf or Gson. JAR ordering and timestamps are reproducible. Copy the JAR into
 Recaf's standard `plugins` directory; see the root README for platform paths.
 Without the Bridge-owned `RECAF_MCP_TOKEN`, a normal Recaf launch leaves the
 MCP server dormant.
-
-Android fidelity tests use an independent dexlib2 encoder/parser (test dependency
-only). The opt-in real-Worker runner invokes `generateAndroidFidelityFixture` to
-generate compact numeric values, nullable parameter names, debug tables and
-cross-DEX callers in its temporary directory. No binary fixtures are checked in.
 
 Before reporting Android workspace readiness, the Worker repairs encoded values
 in detached DEX items and reads modeled debug information. Android remapping
@@ -114,7 +108,7 @@ Every public call has a private operation ID and a cost-based deadline:
 | Timeout | Tools |
 | --- | --- |
 | 15 seconds | `workspace_info`, `list_classes`, `list_files`, `get_class_bytecode`, `get_recaf_script_help` |
-| 60 seconds | `read_file`, `decompile_class`, `search_strings`, `search_instructions`, `search_members`, `search_structure`, `rename_symbol`, `export_mappings`, `get_method_assembly` |
+| 60 seconds | `read_file`, `write_file`, `decompile_class`, `search_strings`, `search_instructions`, `search_members`, `search_structure`, `rename_symbol`, `export_mappings`, `get_method_assembly` |
 | 120 seconds | `search_code`, `call_graph`, `patch_instructions` |
 | 300 seconds | `apply_mappings`, `transform_workspace`, `patch_class`, `run_recaf_script` |
 | 1,800 seconds | `export_sources` |
@@ -129,22 +123,31 @@ workspace access. The Bridge force-terminates a Worker that cannot drain safely.
 The catalog order and base schemas are fixed for a plugin build. The plugin
 never defines the Bridge-owned `database` property.
 
-- `workspace_info`: bounded primary/supporting resource summary.
-- `list_classes`: sorted primary JVM and/or Android names, 20-entry default
-  pages capped at 500. Android entries retain their owning DEX name.
-- `list_files`: sorted primary-resource non-class archive paths with file kind,
-  byte size, extension/directory, Recaf text/charset metadata, and whether a
+- `workspace_info`: bounded primary/supporting resource summary including
+  per-DEX `android_bundles` (`dex_name`, `class_count`, `dex_version`,
+  `dirty_count`) and nested `embedded_resources`.
+- `list_classes`: sorted JVM and/or Android names across primary or embedded
+  resources (`resource`, `include_embedded`), 20-entry default pages capped at
+  500, plus scope/embedded hints when `scope` is omitted.
+- `list_files`: sorted non-class archive paths across primary or embedded
+  resources (`resource`, `include_embedded`) with file kind, byte size,
+  last-dot extension/directory, Recaf text/charset metadata, and whether a
   textual representation is available. Android binary XML is identified as
   `android_binary_xml`. Optional case-sensitive path filtering runs before
   20-entry default pages capped at 500 entries.
-- `read_file`: exact paths returned by `list_files`, with 32 KiB default and
-  512 KiB maximum pages. `format=auto` returns Recaf-recognized text and
-  resource-aware decoded Android binary XML as text; all other files use
-  Base64. Explicit `text` also decodes AXML, while explicit `base64` always
-  returns the original archive bytes. Results identify decoded text and its
-  source, report the offset unit, complete raw byte size, and raw SHA-256. It
-  never resolves a host filesystem path. Passing that raw hash as optional
-  `if_sha256` returns unchanged metadata without decoding or returning a body.
+- `read_file`: exact paths returned by `list_files` (with optional `resource`),
+  32 KiB default and 512 KiB maximum pages. `format=auto` returns
+  Recaf-recognized text, resource-aware decoded Android binary XML, and decoded
+  `resources.arsc` summaries as text; all other files (including raw bytes of
+  mounted multi-level embedded archives) use Base64. Results report `raw_sha256`,
+  `content_sha256`, and format-matched `sha256` (`content_sha256` for `text`,
+  `raw_sha256` for `base64`). Passing `sha256` as optional `if_sha256` returns
+  `unchanged=true` without returning a body.
+- `write_file`: create, replace, edit (`old_text` + `new_text` with optional
+  `replace_all`), or `delete=true` a non-class entry in the primary resource
+  file bundle, with optional `expected_sha256` optimistic concurrency and
+  `dry_run=true` preview. `.class`, `.dex`, and mounted embedded JAR entries are
+  rejected so class/DEX bundles remain authoritative.
 - `decompile_class`: exact primary JVM or Android class and optional
   decompiler; Android classes use Recaf's Android-to-JVM conversion. Source
   pages default to 32 Ki characters and are capped at 500,000 characters. Its
@@ -178,15 +181,17 @@ never defines the Bridge-owned `database` property.
   scope. Android instruction search walks Recaf's native DEX tree and reports
   instruction indexes and DEX offsets without decompilation.
 - `search_members`: Recaf `DeclarationQuery` and `ReferenceQuery` results for
-  fields, methods, or both. Like every search tool, owner/name/descriptor use
-  case-sensitive literal substring matching by default or partial Java regex
-  matching with `regex=true`; omitted selectors match any value. A
+  fields, methods, or both. Selectors default to exact matching (`match="exact"`),
+  with optional `match="contains"` for substring search or `match="regex"` /
+  `regex=true` for partial Java regex; omitted selectors match any value. A
   class/package filter restricts the selected primary JVM and/or Android
   classes scanned. The tool
   reapplies all selectors and kind/result constraints to final identities
   before sorting and pagination.
 - `rename_symbol`: exact JVM or Android class/member rename through Recaf's
-  search and mapping services. Android requests accept DEX identity, select
+  search and mapping services, guarding external/JDK supertype method overrides
+  by default (`force=true` override) and synchronizing JAR `MANIFEST.MF`,
+  `META-INF/services/*`, and APK `AndroidManifest.xml`. Android requests accept DEX identity, select
   only declarations/referrers for bounded memory, and persist through APK/DEX save.
 - `apply_mappings`: inline mapping text parsed by Recaf in any installed
   text format. Its runtime enum currently exposes Enigma, Jadx (Legacy),
@@ -213,7 +218,7 @@ never defines the Bridge-owned `database` property.
 - `transform_workspace`: reviewed transformer aliases only, primary JVM scope,
   typed per-run `options`, up to eight ordered native Recaf `phases` with unique
   IDs and one to three passes each, and per-phase statuses/counts. Extra aliases
-  cover long annotations/exceptions, duplicate catches, variable tables,
+  cover synthetic modifier removal, long annotations/exceptions, duplicate catches, variable tables,
   constant/predicate/variable folding, and static/call/invokedynamic inlining.
   The existing four conservative metadata defaults are unchanged. All phases
   run on detached JVM class bundles (including multi-release bundles), capped
@@ -321,8 +326,18 @@ also match the Bridge's launch record. Health reports
 `dex`, or null for unsupported inputs).
 
 Saving exports only the primary resource to a temporary sibling, validates
-a nonempty ZIP for JAR/APK or parses raw DEX, and atomically installs it. APK/DEX
-destinations must use the corresponding extension. The result reports `format`
-and `apk_signature_status` (`unsigned` for APK; `not_applicable` otherwise). Input aliases and unapproved existing destinations are
-rejected. A failed save leaves the Worker ready and records a retryable
-`last_error`; a later successful save clears it.
+a nonempty ZIP for JAR/APK (including `JarInputStream` manifest-first placement
+for JARs) or parses raw DEX, preserves untouched secondary DEX entries and
+untouched embedded JARs byte-for-byte, aligns APK `STORED` entries (`16384`-byte
+/ 16 KiB page boundary for `.so`, `4`-byte for other `STORED` entries), and
+atomically installs it. JAR/APK/DEX destinations must use the corresponding
+extension (`.jar`/`.zip`, `.apk`, `.dex`). The result reports `format`,
+`jar_signature_status` (`removed`, `preserved`, or `unsigned` for JAR;
+`not_applicable` otherwise), `apk_signature_status` (`unsigned` for APK;
+`not_applicable` otherwise), `apk_alignment_status` (`aligned_16k` for APK;
+`not_applicable` otherwise), `native_lib_alignment_status` (`page_aligned_16k` /
+`no_uncompressed_so` for APK; `not_applicable` otherwise), plus
+`rewritten_dex_entries` and `unchanged_dex_entries` for APK/DEX saves. Input
+aliases and unapproved existing destinations are rejected. A failed save leaves
+the Worker ready and records a retryable `last_error`; a later successful save
+clears it.
