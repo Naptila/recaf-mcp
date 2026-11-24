@@ -94,3 +94,9 @@ for protocol changes.
 
 Never commit build output, virtual environments, IDE metadata, logs, secrets,
 sample binaries, APKs, JARs, recovery data, or anything under `tmp/`.
+
+## Testing Policy
+- **NO Unrequested Tests**: Do NOT create unit tests, smoke tests, sanity checks, or test files when adding or modifying MCP tools unless explicitly instructed by the user.
+- **NO Mocked Glue Tests**: NEVER write tests that mock the Recaf `Workspace`, internal Recaf APIs, HTTP/bridge clients, or MCP server registration/schemas just to assert that a call was forwarded or a tool exists.
+- **NO Inline Smoke Checks**: Never add temporary test entry points, dummy runs, or self-check scripts inside production source files.
+- **Real Integration Only (When Requested)**: When tests are explicitly requested, only write deterministic tests for pure parsing logic (e.g., JVM descriptors, class name normalization) or real integration tests against actual minimal `.class`/`.jar` fixtures—never mocked stubs.

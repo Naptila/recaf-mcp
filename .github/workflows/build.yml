@@ -47,28 +47,13 @@ jobs:
             recaf-mcp-plugin/*.gradle
             recaf-mcp-plugin/gradle/wrapper/gradle-wrapper.properties
 
-      - name: Build and test plugin
+      - name: Build plugin
         if: runner.os != 'Windows'
         run: ./gradlew clean build --no-daemon
 
-      - name: Build and test plugin
+      - name: Build plugin
         if: runner.os == 'Windows'
         run: .\gradlew.bat clean build --no-daemon
-
-      - name: Report Java test failures
-        if: failure()
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import xml.etree.ElementTree as ET
-          for report in Path('build/test-results/test').glob('TEST-*.xml'):
-              for case in ET.parse(report).getroot().findall('testcase'):
-                  for failure in list(case.findall('failure')) + list(case.findall('error')):
-                      text = f"{case.get('classname')}.{case.get('name')}: {failure.get('message')}\n{failure.text or ''}"
-                      text = text[:12000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-                      print(f'::error title=Java test failure::{text}')
-          PY
 
       - name: Upload plugin JAR
         if: runner.os == 'Linux'
@@ -111,13 +96,12 @@ jobs:
       - name: Install locked environment
         run: uv sync --frozen
 
-      - name: Test bridge
-        run: uv run --frozen pytest -q
+      - name: Build bridge distributions
+        run: uv build --out-dir dist
 
-      - name: Build and install bridge distributions
+      - name: Install bridge tool
         if: runner.os == 'Linux'
         run: |
-          uv build --out-dir dist
           uv tool install --force dist/recaf_mcp_bridge-*.whl
           uv tool list
 

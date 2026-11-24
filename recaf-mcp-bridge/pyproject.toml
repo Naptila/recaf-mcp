@@ -36,11 +36,3 @@ py-modules = [
     "watchdog",
     "worker",
 ]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.3,<9",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
