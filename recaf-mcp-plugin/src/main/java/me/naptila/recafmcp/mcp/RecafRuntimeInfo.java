@@ -49,6 +49,9 @@ public record RecafRuntimeInfo(String version, String commit, List<String> error
             Class<?> memberPath = Class.forName("software.coley.recaf.path.ClassMemberPathNode", false, loader);
             requireReturn(pipeline.getMethod("disassemble", memberPath), outcome);
         });
+        check(errors, "Jasm Dalvik register layout API", () ->
+                Class.forName("me.darknet.assembler.backend.dalvik.compile.visitor.DalvikRegisterLayout", false, loader)
+        );
         check(errors, "DEX constructor and code-unit API", () -> {
             Class.forName("me.darknet.dex.tree.DexFile", false, loader)
                     .getConstructor(int.class, List.class);
@@ -100,6 +103,11 @@ public record RecafRuntimeInfo(String version, String commit, List<String> error
             Class<?> feedback = Class.forName("software.coley.recaf.services.transform.TransformationFeedback", false, loader);
             Class<?> result = Class.forName("software.coley.recaf.services.transform.TransformationPlanResult", false, loader);
             requireReturn(applier.getMethod("transformJvm", plan, feedback), result);
+            Class.forName(
+                    "software.coley.recaf.services.deobfuscation.transform.generic.SyntheticModifierRemovingTransformer",
+                    false,
+                    loader
+            );
         });
         return new RecafRuntimeInfo(version, commit, errors);
     }

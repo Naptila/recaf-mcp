@@ -6,7 +6,7 @@ plugins {
 }
 
 group = 'me.naptila'
-version = '1.1.1'
+version = '1.2.0'
 
 ext {
     // The version of Recaf we're building against.
@@ -14,7 +14,7 @@ ext {
     // For Recaf versions:
     //  - Releases: https://mvnrepository.com/artifact/software.coley/recaf-core
     //  - Snapshots: https://jitpack.io/#Col-E/Recaf  (see commits tab)
-    recafVersion = '909012806d893a61f68e2a66e174618c50840343'
+    recafVersion = '42368be5126f737ffa99229d707ae013aacc490f'
     recafSnapshots = true
 
     // This should point to the full name of the class that 'implements Plugin'

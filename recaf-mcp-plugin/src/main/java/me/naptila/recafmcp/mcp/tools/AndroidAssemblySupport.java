@@ -35,14 +35,24 @@ final class AndroidAssemblySupport {
             method.getCode().setDebugInfo(null);
             labels(method.getCode()).forEach(label -> label.lineNumber(Label.UNASSIGNED));
         }
-        // Omit debug-local names and explicit parameter names. Jasm 3.1 can still
-        // print positional pN/this aliases; it resolves them from the signature.
-        // Debug metadata is retained separately when the method body is replaced.
+        // Omit debug-local names and explicit parameter names. Jasm 3.2 sizes
+        // register frames from instructions and resolves pN/this aliases from
+        // the method signature. Debug metadata is retained separately on patch.
         return AndroidDexWriter.withCompatibility(() -> {
             var printer = new DalvikClassPrinter(detached.getBackingDefinition()).method(name, descriptor);
             if (printer == null) {
                 throw new IllegalArgumentException("method not found in Android owner");
             }
+            var context = new PrintContext<>("    ");
+            printer.print(context);
+            return context.toString();
+        });
+    }
+
+    static String disassembleClass(AndroidClassInfo info) throws IOException {
+        var detached = AndroidDexReader.readClass(AndroidDexReader.encodeClass(info, 39), info.getName());
+        return AndroidDexWriter.withCompatibility(() -> {
+            var printer = new DalvikClassPrinter(detached.getBackingDefinition());
             var context = new PrintContext<>("    ");
             printer.print(context);
             return context.toString();
@@ -79,7 +89,9 @@ final class AndroidAssemblySupport {
             if (!tokens.isSuccess()) {
                 return new MethodAssemblySupport.OperationResult<>(null, diagnostics);
             }
-            var parsed = pipeline.fullParse(tokens.requireValue());
+            var parsed = pipeline.fullParse(
+                    JasmEscapeSupport.normalizeIdentifierTokens(tokens.requireValue())
+            );
             diagnostics.addAll(MethodAssemblySupport.RecafMethodAssembler.diagnostics("parse", parsed));
             if (!parsed.isSuccess()) {
                 return new MethodAssemblySupport.OperationResult<>(null, diagnostics);
@@ -95,8 +107,13 @@ final class AndroidAssemblySupport {
             diagnostics.addAll(MethodAssemblySupport.RecafMethodAssembler.diagnostics("assemble", assembled));
             if (assembled.isSuccess()) {
                 var after = assembled.value().getBackingDefinition().getMethod(name, descriptor);
-                var originalParsed = pipeline.fullParse(pipeline.tokenize(disassemble(
-                        entry.classInfo().asAndroidClass(), name, descriptor), "<original>").requireValue());
+                var originalTokens = pipeline.tokenize(
+                        disassemble(entry.classInfo().asAndroidClass(), name, descriptor),
+                        "<original>"
+                ).requireValue();
+                var originalParsed = pipeline.fullParse(
+                        JasmEscapeSupport.normalizeIdentifierTokens(originalTokens)
+                );
                 restoreDebug(beforeCode, after.getCode(),
                         labelNames(methodAst(originalParsed.requireValue())), labelNames(submitted));
                 after.setParameterNames(parameterNames);
@@ -148,17 +165,25 @@ final class AndroidAssemblySupport {
             label.lineNumber(line.line());
             return new DebugInformation.LineNumber(label, line.line());
         }).toList();
-        var locals = original.locals().stream().map(local -> {
+        int beforeFirstParameter = before.getRegisters() - before.getIn();
+        int afterFirstParameter = after.getRegisters() - after.getIn();
+        var locals = new ArrayList<DebugInformation.LocalVariable>();
+        for (var local : original.locals()) {
             int register = local.register();
-            int firstParameter = before.getRegisters() - before.getIn();
-            if (register >= firstParameter) register += after.getRegisters() - before.getRegisters();
-            if (register < 0 || register >= after.getRegisters()
-                    || local.register() < firstParameter && register >= after.getRegisters() - after.getIn()) {
+            if (register >= beforeFirstParameter) {
+                register = afterFirstParameter + (register - beforeFirstParameter);
+                if (register < afterFirstParameter || register >= after.getRegisters()) {
+                    throw new IllegalArgumentException("patch changes a register used by existing debug metadata");
+                }
+            } else if (register < 0) {
                 throw new IllegalArgumentException("patch changes a register used by existing debug metadata");
+            } else if (register >= afterFirstParameter) {
+                // Jasm 3.2 compacts non-parameter frames to maxUsedLocal + 1; locals above that bound are unused.
+                continue;
             }
-            return new DebugInformation.LocalVariable(register, local.name(), local.type(), local.signature(),
-                    mapped.apply(local.start()), mapped.apply(local.end()));
-        }).toList();
+            locals.add(new DebugInformation.LocalVariable(register, local.name(), local.type(), local.signature(),
+                    mapped.apply(local.start()), mapped.apply(local.end())));
+        }
         after.setDebugInfo(new DebugInformation(lines, List.of(), original.parameterNames(), locals));
     }
 

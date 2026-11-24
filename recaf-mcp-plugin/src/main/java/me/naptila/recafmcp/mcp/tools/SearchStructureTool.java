@@ -19,7 +19,15 @@ import java.util.function.Supplier;
 /** Searches class/member/instruction structure using Recaf's native backends. */
 public final class SearchStructureTool implements McpTool {
     private static final int MAX_RESULTS = 20_000;
-    private static final Set<String> ARGUMENTS = Set.of("query", "scope", "dex_name", "offset", "limit");
+    private static final Set<String> ARGUMENTS = Set.of(
+            "query",
+            "scope",
+            "dex_name",
+            ClassToolSupport.RESOURCE_ARGUMENT,
+            ClassToolSupport.INCLUDE_EMBEDDED_ARGUMENT,
+            "offset",
+            "limit"
+    );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
     private final BooleanSupplier hasWorkspace;
     private final Supplier<Workspace> workspaceSupplier;
@@ -53,7 +61,7 @@ public final class SearchStructureTool implements McpTool {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
         JsonObject specification = StructureQuerySupport.object(arguments.get("query"), "query");
         var query = StructureQuerySupport.parse(specification);
-        var selection = ClassToolSupport.parseSelection(arguments, true);
+        var selection = ClassToolSupport.parseSelection(arguments, true, true);
         int offset = ToolArguments.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
         int limit = ToolArguments.integer(arguments, "limit", SearchToolSupport.DEFAULT_LIMIT, 1, SearchToolSupport.MAX_LIMIT);
         if (!hasWorkspace.getAsBoolean()) {
@@ -61,7 +69,12 @@ public final class SearchStructureTool implements McpTool {
             error.addProperty("error", "workspace not open");
             return McpTool.errorResult("workspace not open", error);
         }
-        var entries = ClassToolSupport.entries(workspaceSupplier.get().getPrimaryResource(), selection);
+        var primary = workspaceSupplier.get().getPrimaryResource();
+        JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
+        if (selectionError != null) {
+            return selectionError;
+        }
+        var entries = ClassToolSupport.entries(primary, selection);
         JsonArray hits = new JsonArray();
         int total = 0;
         int scanned = 0;
@@ -83,7 +96,12 @@ public final class SearchStructureTool implements McpTool {
                 JsonObject hit = new JsonObject();
                 hit.addProperty("class_name", entry.className());
                 ClassToolSupport.addHitIdentity(hit, entry);
-                hit.addProperty("access", entry.classInfo().getAccess());
+                int rawAccess = entry.classInfo().getAccess();
+                boolean isJvm = entry.classInfo().isJvmClass();
+                hit.addProperty("access", isJvm ? (rawAccess & 0xFFFF) : rawAccess);
+                if (isJvm && (rawAccess & org.objectweb.asm.Opcodes.ACC_DEPRECATED) != 0) {
+                    hit.addProperty("deprecated", true);
+                }
                 hit.addProperty("field_count", entry.classInfo().getFields().size());
                 hit.addProperty("method_count", entry.classInfo().getMethods().size());
                 hits.add(hit);
@@ -93,9 +111,11 @@ public final class SearchStructureTool implements McpTool {
         JsonObject result = new JsonObject();
         result.add("query", specification.deepCopy());
         result.add("hits", hits);
-        result.addProperty("scope", ClassToolSupport.outputScope(selection.scope(), false));
+        result.addProperty("scope", ClassToolSupport.outputScope(selection.scope(), false, selection));
         result.addProperty("requested_scope", selection.scope().value());
         result.addProperty("dex_name", selection.dexName());
+        ClassToolSupport.addSelectionMetadata(result, selection);
+        ClassToolSupport.addScopeDiagnostics(result, primary, selection);
         result.addProperty("search_backend", "recaf_class_query");
         result.addProperty("classes_selected", entries.size());
         result.addProperty("classes_scanned", scanned);
@@ -119,7 +139,7 @@ public final class SearchStructureTool implements McpTool {
         properties.remove("text");
         properties.remove("regex");
         properties.add("query", StructureQuerySupport.schema());
-        ClassToolSupport.addScopeProperties(properties, true);
+        ClassToolSupport.addScopeProperties(properties, true, true, true);
         JsonArray required = new JsonArray();
         required.add("query");
         schema.add("required", required);

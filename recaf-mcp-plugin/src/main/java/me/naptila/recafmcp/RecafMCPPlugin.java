@@ -36,6 +36,7 @@ import me.naptila.recafmcp.mcp.tools.SearchStringsTool;
 import me.naptila.recafmcp.mcp.tools.SearchStructureTool;
 import me.naptila.recafmcp.mcp.tools.TransformWorkspaceTool;
 import me.naptila.recafmcp.mcp.tools.WorkspaceInfoTool;
+import me.naptila.recafmcp.mcp.tools.WriteFileTool;
 import org.slf4j.Logger;
 import software.coley.recaf.analytics.logging.Logging;
 import software.coley.recaf.info.properties.builtin.InputFilePathProperty;
@@ -81,7 +82,7 @@ import java.util.concurrent.Executors;
 )
 public class RecafMCPPlugin implements Plugin {
     public static final String PLUGIN_ID = "me.naptila.recaf-mcp-plugin";
-    public static final String PLUGIN_VERSION = "1.1.1";
+    public static final String PLUGIN_VERSION = "1.2.0";
     public static final String PLUGIN_NAME = "Recaf MCP Plugin";
     public static final String PLUGIN_DESCRIPTION =
             "MCP server for autonomous Java reverse engineering via LLM agents";
@@ -193,6 +194,7 @@ public class RecafMCPPlugin implements Plugin {
                     new ListClassesTool(workspaceManager),
                     new ListFilesTool(workspaceManager),
                     new ReadFileTool(workspaceManager),
+                    new WriteFileTool(workspaceManager),
                     new DecompileClassTool(workspaceManager, decompilerManager),
                     new ExportDecompiledSourcesTool(workspaceManager, decompilerManager),
                     new SearchStringsTool(
@@ -263,7 +265,9 @@ public class RecafMCPPlugin implements Plugin {
             logger.info("RECAF_MCP_READY host=127.0.0.1 port={}", server.getPort());
             if (System.getProperty("recaf.mcp.input_path") != null && expectedInputPath != null
                     && health.getRecafRuntime().compatible()) {
-                inputLoader = Executors.newSingleThreadExecutor();
+                inputLoader = Executors.newSingleThreadExecutor(
+                        Thread.ofPlatform().daemon(true).name("recaf-mcp-input-loader").factory()
+                );
                 inputLoader.submit(() -> loadInput(expectedInputPath, health));
             }
         } catch (IOException | IllegalArgumentException ex) {
@@ -353,9 +357,17 @@ public class RecafMCPPlugin implements Plugin {
             health.setLastError("Android workspace preparation failed: " + ex.getMessage());
             return;
         }
+        String outputFormat = RecafSaveWorkspaceHandler.outputFormat(workspace);
+        boolean hasClasses = fileResource.classBundleStreamRecursive()
+                .anyMatch(bundle -> !bundle.isEmpty());
+        boolean hasEmbedded = !fileResource.getEmbeddedResources().isEmpty();
+        if (outputFormat == null && !hasClasses && !hasEmbedded) {
+            health.setLastError("input file is not a supported JAR, APK, DEX, ZIP, or JVM classfile");
+            return;
+        }
         health.markWorkspaceReady(
                 canonicalize(inputPath).toString(),
-                RecafSaveWorkspaceHandler.outputFormat(workspace)
+                outputFormat
         );
     }
 
@@ -375,7 +387,7 @@ public class RecafMCPPlugin implements Plugin {
                 Thread.currentThread().interrupt();
             }
             System.exit(0);
-        }, "recaf-mcp-spike-shutdown");
+        }, "recaf-mcp-shutdown");
         shutdownThread.setDaemon(false);
         shutdownThread.start();
     }

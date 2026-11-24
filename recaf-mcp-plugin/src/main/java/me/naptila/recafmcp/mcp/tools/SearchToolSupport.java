@@ -4,10 +4,17 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
+import me.naptila.recafmcp.mcp.util.ToolCancellation;
+import software.coley.recaf.info.ClassInfo;
+import software.coley.recaf.info.FileInfo;
+import software.coley.recaf.path.PathNode;
+import software.coley.recaf.services.search.SearchFeedback;
 import software.coley.recaf.services.search.match.StringPredicate;
 import software.coley.recaf.services.search.match.StringPredicateProvider;
+import software.coley.recaf.services.search.result.Result;
 
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -104,26 +111,107 @@ final class SearchToolSupport {
         return index >= request.offset() && index < end;
     }
 
-    static StringPredicate predicate(StringPredicateProvider provider,
-                                     String text,
-                                     boolean regex) {
-        if (text == null) {
-            return null;
-        }
-        return regex
-                ? provider.newPartialRegexPredicate(text)
-                : provider.newContainsPredicate(text);
+    static StringPredicate unicodeAwarePredicate(StringPredicateProvider provider,
+                                                 String text,
+                                                 boolean regex) {
+        Predicate<String> matcher = unicodeAwareMatcher(text, regex);
+        return new StringPredicate("recaf-mcp-unicode-search", value -> value != null && matcher.test(value));
     }
 
-    static Predicate<String> matcher(String text, boolean regex) {
+    static Predicate<String> unicodeAwareMatcher(String text, boolean regex) {
         if (text == null) {
             return ignored -> true;
         }
-        if (!regex) {
-            return value -> value.contains(text);
+        Predicate<String> direct = matcher(text, regex);
+        if (regex) {
+            return value -> {
+                if (direct.test(value)) {
+                    return true;
+                }
+                if (value.indexOf("\\u") >= 0) {
+                    String unescaped = JasmEscapeSupport.unescapeUnicodeLiterals(value);
+                    return !unescaped.equals(value) && direct.test(unescaped);
+                }
+                return false;
+            };
         }
-        Pattern pattern = Pattern.compile(text);
-        return value -> pattern.matcher(value).find();
+        String normQuery = JasmEscapeSupport.unescapeUnicodeLiterals(text);
+        boolean queryHadEscapes = !normQuery.equals(text);
+        return value -> {
+            if (direct.test(value)) {
+                return true;
+            }
+            if (queryHadEscapes && value.contains(normQuery)) {
+                return true;
+            }
+            if (value.indexOf("\\u") >= 0) {
+                String unescaped = JasmEscapeSupport.unescapeUnicodeLiterals(value);
+                return !unescaped.equals(value) && unescaped.contains(normQuery);
+            }
+            return false;
+        };
+    }
+
+    static StringPredicate predicate(StringPredicateProvider provider,
+                                     String text,
+                                     boolean regex) {
+        return predicate(provider, text, regex ? MatchMode.REGEX : MatchMode.CONTAINS);
+    }
+
+    static StringPredicate predicate(StringPredicateProvider provider,
+                                     String text,
+                                     MatchMode mode) {
+        if (text == null) {
+            return null;
+        }
+        return switch (mode) {
+            case EXACT -> provider.newEqualPredicate(text);
+            case CONTAINS -> provider.newContainsPredicate(text);
+            case REGEX -> provider.newPartialRegexPredicate(text);
+        };
+    }
+
+    static Predicate<String> matcher(String text, boolean regex) {
+        return matcher(text, regex ? MatchMode.REGEX : MatchMode.CONTAINS);
+    }
+
+    static Predicate<String> matcher(String text, MatchMode mode) {
+        if (text == null) {
+            return ignored -> true;
+        }
+        return switch (mode) {
+            case EXACT -> text::equals;
+            case CONTAINS -> value -> value.contains(text);
+            case REGEX -> {
+                Pattern pattern = Pattern.compile(text);
+                yield value -> pattern.matcher(value).find();
+            }
+        };
+    }
+
+    enum MatchMode {
+        EXACT("exact"),
+        CONTAINS("contains"),
+        REGEX("regex");
+
+        private final String jsonName;
+
+        MatchMode(String jsonName) {
+            this.jsonName = jsonName;
+        }
+
+        String jsonName() {
+            return jsonName;
+        }
+
+        static MatchMode from(String value) {
+            for (MatchMode mode : values()) {
+                if (mode.jsonName.equals(value)) {
+                    return mode;
+                }
+            }
+            throw new IllegalArgumentException("match must be exact, contains, or regex");
+        }
     }
 
     static void validateRegex(String expression, String name) {
@@ -140,6 +228,55 @@ final class SearchToolSupport {
                     ex
             );
         }
+    }
+
+    static SearchFeedback classOnlyFeedback(Set<ClassInfo> selectedClasses,
+                                            int maxResults,
+                                            AtomicInteger accepted,
+                                            Predicate<Result<?>> resultFilter) {
+        return new SearchFeedback() {
+            @Override
+            public boolean hasRequestedCancellation() {
+                return ToolCancellation.requested() || accepted.get() >= maxResults;
+            }
+
+            @Override
+            public boolean doVisitClass(ClassInfo classInfo) {
+                return selectedClasses.contains(classInfo);
+            }
+
+            @Override
+            public boolean doVisitFile(FileInfo fileInfo) {
+                return false;
+            }
+
+            @Override
+            public boolean doAcceptResult(Result<?> result) {
+                if (resultFilter != null && !resultFilter.test(result)) {
+                    return false;
+                }
+                while (true) {
+                    int current = accepted.get();
+                    if (current >= maxResults) {
+                        return false;
+                    }
+                    if (accepted.compareAndSet(current, current + 1)) {
+                        return true;
+                    }
+                }
+            }
+        };
+    }
+
+    static <T extends PathNode<?>> T findPath(PathNode<?> start, Class<T> type) {
+        PathNode<?> current = start;
+        while (current != null) {
+            if (type.isInstance(current)) {
+                return type.cast(current);
+            }
+            current = current.getParent();
+        }
+        return null;
     }
 
     record Request(String text, boolean regex, int offset, int limit) {

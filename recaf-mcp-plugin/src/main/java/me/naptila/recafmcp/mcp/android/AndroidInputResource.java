@@ -1,6 +1,7 @@
 package me.naptila.recafmcp.mcp.android;
 
 import software.coley.recaf.info.FileInfo;
+import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
 import software.coley.recaf.workspace.model.resource.BasicWorkspaceFileResource;
 import software.coley.recaf.workspace.model.resource.WorkspaceFileResourceBuilder;
 
@@ -40,6 +41,13 @@ public final class AndroidInputResource extends BasicWorkspaceFileResource {
     public boolean isOriginalFile(String name, FileInfo current) {
         DeferredFileInfo file = originalFiles.get(name);
         return file != null && file.isOriginal(current);
+    }
+
+    public boolean isOriginalDex(String name, AndroidClassBundle bundle) {
+        return bundle != null
+                && bundle.getDirtyKeys().isEmpty()
+                && bundle.getRemovedKeys().isEmpty()
+                && Objects.equals(classes.get(name), bundle.keySet());
     }
 
     public void validateReady() throws IOException {

@@ -172,7 +172,7 @@ public final class McpRequestHandler {
                     "get_recaf_script_help" -> 15;
             case "decompile_class", "search_strings", "search_instructions",
                     "search_members", "search_structure", "rename_symbol", "get_method_assembly",
-                    "read_file", "export_mappings" -> 60;
+                    "read_file", "write_file", "export_mappings" -> 60;
             case "search_code", "call_graph", "patch_instructions" -> 120;
             case "transform_workspace", "patch_class", "run_recaf_script",
                     "apply_mappings" -> 300;
@@ -256,6 +256,11 @@ public final class McpRequestHandler {
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             return error(id, -32603, "Operation interrupted");
+        } catch (java.nio.file.FileAlreadyExistsException ex) {
+            String message = "Workspace save failed: destination already exists; "
+                    + "set overwrite=true to replace it (" + exceptionMessage(ex) + ")";
+            health.recordOperationError(message);
+            return error(id, -32011, message);
         } catch (Exception ex) {
             String message = "Workspace save failed: " + exceptionMessage(ex);
             health.recordOperationError(message);

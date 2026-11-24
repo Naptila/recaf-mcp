@@ -6,8 +6,11 @@ import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
+import me.naptila.recafmcp.mcp.util.ToolErrors;
 import software.coley.recaf.info.ClassInfo;
 import software.coley.recaf.info.member.ClassMember;
+import software.coley.recaf.info.member.FieldMember;
+import software.coley.recaf.info.member.MethodMember;
 import software.coley.recaf.path.AndroidInstructionPathNode;
 import software.coley.recaf.path.ClassMemberPathNode;
 import software.coley.recaf.path.ClassPathNode;
@@ -35,6 +38,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -43,7 +47,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
- * Searches Recaf member declarations and references in primary JVM and Android classes.
+ * Searches Recaf member declarations and references in primary or embedded JVM and Android classes.
  */
 public final class SearchMembersTool implements McpTool {
     private static final int DEFAULT_LIMIT = 10;
@@ -52,9 +56,23 @@ public final class SearchMembersTool implements McpTool {
     private static final int MAX_FILTER_LENGTH = 500;
     private static final int MAX_COLLECTED_RESULTS = 20_000;
     private static final Set<String> ARGUMENTS = Set.of(
-            "owner", "name", "descriptor", "regex", "kind", "results",
-            "filter", "scope", "dex_name", "offset", "limit"
+            "owner",
+            "name",
+            "descriptor",
+            "match",
+            "descriptor_match",
+            "regex",
+            "kind",
+            "results",
+            "filter",
+            "scope",
+            "dex_name",
+            ClassToolSupport.RESOURCE_ARGUMENT,
+            ClassToolSupport.INCLUDE_EMBEDDED_ARGUMENT,
+            "offset",
+            "limit"
     );
+    private static final Set<String> MATCH_MODES = Set.of("exact", "contains", "regex");
     private static final Set<String> MEMBER_KINDS = Set.of("any", "field", "method");
     private static final Set<String> RESULT_SCOPES = Set.of(
             "both", "references", "declarations"
@@ -69,6 +87,7 @@ public final class SearchMembersTool implements McpTool {
             .thenComparing(MemberHit::className)
             .thenComparing(MemberHit::classScope)
             .thenComparing(MemberHit::dexName, Comparator.nullsFirst(String::compareTo))
+            .thenComparing(MemberHit::resourcePath, Comparator.nullsFirst(String::compareTo))
             .thenComparing(MemberHit::containingMemberKind,
                     Comparator.nullsFirst(String::compareTo))
             .thenComparing(MemberHit::containingMemberName,
@@ -80,7 +99,8 @@ public final class SearchMembersTool implements McpTool {
 
     private final BooleanSupplier hasWorkspace;
     private final Supplier<Workspace> workspaceSupplier;
-    private final SearchOperation searchOperation;
+    private final SelectedEntriesSearchOperation searchOperation;
+    private final boolean usesDefaultRecafSearch;
 
     public SearchMembersTool(WorkspaceManager workspaceManager,
                              SearchService searchService,
@@ -88,12 +108,14 @@ public final class SearchMembersTool implements McpTool {
         this(
                 workspaceManager::hasCurrentWorkspace,
                 workspaceManager::getCurrent,
-                (workspace, request) -> runSearch(
+                (workspace, request, selectedEntries) -> runSearch(
                         workspace,
                         searchService,
                         predicateProvider,
-                        request
-                )
+                        request,
+                        selectedEntries
+                ),
+                true
         );
     }
 
@@ -104,21 +126,42 @@ public final class SearchMembersTool implements McpTool {
         this(
                 hasWorkspace,
                 workspaceSupplier,
-                (workspace, request) -> runSearch(
+                (workspace, request, selectedEntries) -> runSearch(
                         workspace,
                         searchService,
                         predicateProvider,
-                        request
-                )
+                        request,
+                        selectedEntries
+                ),
+                true
         );
     }
 
     SearchMembersTool(BooleanSupplier hasWorkspace,
                       Supplier<Workspace> workspaceSupplier,
                       SearchOperation searchOperation) {
+        this(
+                hasWorkspace,
+                workspaceSupplier,
+                (workspace, request, selectedEntries) -> searchOperation.run(workspace, request),
+                false
+        );
+    }
+
+    SearchMembersTool(BooleanSupplier hasWorkspace,
+                      Supplier<Workspace> workspaceSupplier,
+                      SelectedEntriesSearchOperation searchOperation) {
+        this(hasWorkspace, workspaceSupplier, searchOperation, false);
+    }
+
+    private SearchMembersTool(BooleanSupplier hasWorkspace,
+                              Supplier<Workspace> workspaceSupplier,
+                              SelectedEntriesSearchOperation searchOperation,
+                              boolean usesDefaultRecafSearch) {
         this.hasWorkspace = Objects.requireNonNull(hasWorkspace, "hasWorkspace");
         this.workspaceSupplier = Objects.requireNonNull(workspaceSupplier, "workspaceSupplier");
         this.searchOperation = Objects.requireNonNull(searchOperation, "searchOperation");
+        this.usesDefaultRecafSearch = usesDefaultRecafSearch;
     }
 
     @Override
@@ -144,35 +187,62 @@ public final class SearchMembersTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
-        int classesSelected = (int) ClassToolSupport.entries(
-                        workspace.getPrimaryResource(),
-                        request.selection()
-                )
-                .stream()
-                .filter(entry -> request.filter() == null
-                        || entry.className().contains(request.filter()))
-                .count();
-        SearchOutcome outcome;
-        try {
-            outcome = searchOperation.run(workspace, request);
-        } catch (Exception ex) {
-            ToolCancellation.propagateIfRequested(ex);
-            return error("member search failed: " + exceptionMessage(ex), request);
+        WorkspaceResource primary = workspace.getPrimaryResource();
+        JsonObject selectionError = ClassToolSupport.validateSelection(
+                primary,
+                request.selection()
+        );
+        if (selectionError != null) {
+            return selectionError;
         }
 
-        List<MemberHit> hits = new ArrayList<>(outcome.hits());
         Predicate<String> ownerMatches = SearchToolSupport.matcher(
                 request.owner(),
-                request.regex()
+                request.matchMode()
         );
         Predicate<String> nameMatches = SearchToolSupport.matcher(
                 request.name(),
-                request.regex()
+                request.matchMode()
         );
         Predicate<String> descriptorMatches = SearchToolSupport.matcher(
                 request.descriptor(),
-                request.regex()
+                request.descriptorMatchMode()
         );
+
+        int classesSelected;
+        SearchOutcome outcome;
+        if (usesDefaultRecafSearch && request.results().equals("declarations")) {
+            List<ClassToolSupport.Entry> candidateEntries = selectDeclarationEntries(
+                    primary,
+                    request
+            );
+            classesSelected = candidateEntries.size();
+            outcome = scanDirectDeclarations(
+                    candidateEntries,
+                    request,
+                    ownerMatches,
+                    nameMatches,
+                    descriptorMatches
+            );
+        } else {
+            List<ClassToolSupport.Entry> selectedEntries = ClassToolSupport.entries(
+                            primary,
+                            request.selection()
+                    )
+                    .stream()
+                    .filter(entry -> request.filter() == null
+                            || entry.className().contains(request.filter()))
+                    .toList();
+            classesSelected = selectedEntries.size();
+            try {
+                outcome = searchOperation.run(workspace, request, selectedEntries);
+            } catch (Exception ex) {
+                ToolCancellation.propagateIfRequested(ex);
+                return error("member search failed: " + ToolErrors.message(ex), request);
+            }
+        }
+
+        List<MemberHit> hits = new ArrayList<>(outcome.hits());
         hits.removeIf(hit -> !matchesRequest(
                 hit,
                 request,
@@ -190,8 +260,13 @@ public final class SearchMembersTool implements McpTool {
         structured.add("hits", page);
         structured.addProperty(
                 "scope",
-                ClassToolSupport.outputScope(request.selection().scope(), false)
+                ClassToolSupport.outputScope(
+                        request.selection().scope(),
+                        false,
+                        request.selection()
+                )
         );
+        ClassToolSupport.addScopeDiagnostics(structured, primary, request.selection());
         structured.addProperty("classes_selected", classesSelected);
         structured.addProperty("collection_truncated", outcome.collectionTruncated());
         addPageMetadata(structured, request, hits.size(), end - start);
@@ -201,24 +276,142 @@ public final class SearchMembersTool implements McpTool {
         );
     }
 
+    private static List<ClassToolSupport.Entry> selectDeclarationEntries(
+            WorkspaceResource primary,
+            SearchRequest request) {
+        if (request.matchMode() == SearchToolSupport.MatchMode.EXACT
+                && request.owner() != null) {
+            return ClassToolSupport.exact(
+                            primary,
+                            request.selection(),
+                            request.owner()
+                    )
+                    .stream()
+                    .filter(entry -> request.filter() == null
+                            || entry.className().contains(request.filter()))
+                    .toList();
+        }
+        Predicate<String> ownerMatches = SearchToolSupport.matcher(
+                request.owner(),
+                request.matchMode()
+        );
+        return ClassToolSupport.entries(primary, request.selection())
+                .stream()
+                .filter(entry -> request.filter() == null
+                        || entry.className().contains(request.filter()))
+                .filter(entry -> ownerMatches.test(entry.className()))
+                .toList();
+    }
+
+    private static SearchOutcome scanDirectDeclarations(
+            List<ClassToolSupport.Entry> entries,
+            SearchRequest request,
+            Predicate<String> ownerMatches,
+            Predicate<String> nameMatches,
+            Predicate<String> descriptorMatches) {
+        List<MemberHit> hits = new ArrayList<>();
+        boolean truncated = false;
+        scan:
+        for (ClassToolSupport.Entry entry : entries) {
+            ToolCancellation.check();
+            ClassInfo classInfo = entry.classInfo();
+            if (!ownerMatches.test(classInfo.getName())) {
+                continue;
+            }
+            if (!request.kind().equals("method")) {
+                for (FieldMember field : classInfo.getFields()) {
+                    if (!nameMatches.test(field.getName())
+                            || !descriptorMatches.test(field.getDescriptor())) {
+                        continue;
+                    }
+                    if (hits.size() >= MAX_COLLECTED_RESULTS) {
+                        truncated = true;
+                        break scan;
+                    }
+                    hits.add(new MemberHit(
+                            "declaration",
+                            "field",
+                            classInfo.getName(),
+                            field.getName(),
+                            field.getDescriptor(),
+                            field.getAccess(),
+                            classInfo.getName(),
+                            entry.scope().value(),
+                            entry.dexName(),
+                            entry.resourcePath(),
+                            null,
+                            null,
+                            null,
+                            null
+                    ));
+                }
+            }
+            if (!request.kind().equals("field")) {
+                for (MethodMember method : classInfo.getMethods()) {
+                    if (!nameMatches.test(method.getName())
+                            || !descriptorMatches.test(method.getDescriptor())) {
+                        continue;
+                    }
+                    if (hits.size() >= MAX_COLLECTED_RESULTS) {
+                        truncated = true;
+                        break scan;
+                    }
+                    hits.add(new MemberHit(
+                            "declaration",
+                            "method",
+                            classInfo.getName(),
+                            method.getName(),
+                            method.getDescriptor(),
+                            method.getAccess(),
+                            classInfo.getName(),
+                            entry.scope().value(),
+                            entry.dexName(),
+                            entry.resourcePath(),
+                            null,
+                            null,
+                            null,
+                            null
+                    ));
+                }
+            }
+        }
+        return new SearchOutcome(hits, truncated);
+    }
+
     static SearchOutcome runSearch(Workspace workspace,
                                    SearchService searchService,
                                    StringPredicateProvider provider,
                                    SearchRequest request) {
+        List<ClassToolSupport.Entry> selectedEntries = ClassToolSupport.entries(
+                        workspace.getPrimaryResource(),
+                        request.selection()
+                )
+                .stream()
+                .filter(entry -> request.filter() == null
+                        || entry.className().contains(request.filter()))
+                .toList();
+        return runSearch(workspace, searchService, provider, request, selectedEntries);
+    }
+
+    private static SearchOutcome runSearch(Workspace workspace,
+                                           SearchService searchService,
+                                           StringPredicateProvider provider,
+                                           SearchRequest request,
+                                           List<ClassToolSupport.Entry> selectedEntries) {
         StringPredicate owner = SearchToolSupport.predicate(
                 provider,
                 request.owner(),
-                request.regex()
+                request.matchMode()
         );
         StringPredicate name = SearchToolSupport.predicate(
                 provider,
                 request.name(),
-                request.regex()
+                request.matchMode()
         );
         StringPredicate descriptor = SearchToolSupport.predicate(
                 provider,
                 request.descriptor(),
-                request.regex()
+                request.descriptorMatchMode()
         );
         List<Query> queries = new ArrayList<>(2);
         if (!request.results().equals("references")) {
@@ -229,40 +422,27 @@ public final class SearchMembersTool implements McpTool {
         }
 
         WorkspaceResource primary = workspace.getPrimaryResource();
+        Set<WorkspaceResource> allowedResources = Collections.newSetFromMap(
+                new IdentityHashMap<>()
+        );
+        ClassToolSupport.targetResources(primary, request.selection())
+                .forEach(item -> allowedResources.add(item.resource()));
+        Map<ClassInfo, ClassToolSupport.Entry> selectedByClass = new IdentityHashMap<>();
         Set<ClassInfo> selectedClasses = Collections.newSetFromMap(new IdentityHashMap<>());
-        ClassToolSupport.entries(primary, request.selection()).stream()
-                .filter(entry -> request.filter() == null
-                        || entry.className().contains(request.filter()))
-                .forEach(entry -> selectedClasses.add(entry.classInfo()));
+        selectedEntries.forEach(entry -> {
+            selectedClasses.add(entry.classInfo());
+            selectedByClass.put(entry.classInfo(), entry);
+        });
+        if (selectedClasses.isEmpty()) {
+            return new SearchOutcome(List.of(), false);
+        }
         AtomicInteger accepted = new AtomicInteger();
-        SearchFeedback feedback = new SearchFeedback() {
-            @Override
-            public boolean hasRequestedCancellation() {
-                return ToolCancellation.requested()
-                        || accepted.get() >= MAX_COLLECTED_RESULTS;
-            }
-
-            @Override
-            public boolean doVisitClass(ClassInfo classInfo) {
-                return selectedClasses.contains(classInfo);
-            }
-
-            @Override
-            public boolean doAcceptResult(Result<?> result) {
-                if (!matchesKind(result, request.kind())) {
-                    return false;
-                }
-                while (true) {
-                    int current = accepted.get();
-                    if (current >= MAX_COLLECTED_RESULTS) {
-                        return false;
-                    }
-                    if (accepted.compareAndSet(current, current + 1)) {
-                        return true;
-                    }
-                }
-            }
-        };
+        SearchFeedback feedback = SearchToolSupport.classOnlyFeedback(
+                selectedClasses,
+                MAX_COLLECTED_RESULTS,
+                accepted,
+                result -> matchesKind(result, request.kind())
+        );
 
         List<MemberHit> hits = new ArrayList<>();
         for (Result<?> result : searchService.search(workspace, queries, feedback)) {
@@ -272,28 +452,29 @@ public final class SearchMembersTool implements McpTool {
                 continue;
             }
             PathNode<?> path = result.getPath();
-            ResourcePathNode resourcePath = findPath(path, ResourcePathNode.class);
-            ClassPathNode classPath = findPath(path, ClassPathNode.class);
+            ResourcePathNode resourcePath = SearchToolSupport.findPath(path, ResourcePathNode.class);
+            ClassPathNode classPath = SearchToolSupport.findPath(path, ClassPathNode.class);
             if (resourcePath == null
-                    || resourcePath.getValue() != primary
+                    || !allowedResources.contains(resourcePath.getValue())
                     || classPath == null
                     || !(classPath.getValue() instanceof ClassInfo classInfo)) {
                 continue;
             }
-            ClassToolSupport.Entry classEntry = ClassToolSupport.identify(primary, classInfo);
-            if (classEntry == null || !selectedClasses.contains(classInfo)) {
+            ClassToolSupport.Entry classEntry = selectedByClass.get(classInfo);
+            if (classEntry == null) {
                 continue;
             }
-            ClassMemberPathNode memberPath = findPath(path, ClassMemberPathNode.class);
+            boolean isReference = "reference".equals(identity.resultType());
+            ClassMemberPathNode memberPath = isReference
+                    ? SearchToolSupport.findPath(path, ClassMemberPathNode.class)
+                    : null;
             ClassMember containingMember = memberPath == null ? null : memberPath.getValue();
-            JvmInstructionPathNode instructionPath = findPath(
-                    path,
-                    JvmInstructionPathNode.class
-            );
-            AndroidInstructionPathNode androidInstructionPath = findPath(
-                    path,
-                    AndroidInstructionPathNode.class
-            );
+            JvmInstructionPathNode instructionPath = isReference
+                    ? SearchToolSupport.findPath(path, JvmInstructionPathNode.class)
+                    : null;
+            AndroidInstructionPathNode androidInstructionPath = isReference
+                    ? SearchToolSupport.findPath(path, AndroidInstructionPathNode.class)
+                    : null;
             Integer instructionIndex = null;
             if (instructionPath != null) {
                 instructionIndex = instructionPath.getInstructionIndex();
@@ -310,6 +491,7 @@ public final class SearchMembersTool implements McpTool {
                     classInfo.getName(),
                     classEntry.scope().value(),
                     classEntry.dexName(),
+                    classEntry.resourcePath(),
                     containingMember == null
                             ? null
                             : containingMember.isField() ? "field" : "method",
@@ -328,6 +510,7 @@ public final class SearchMembersTool implements McpTool {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
         ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(
                 arguments,
+                true,
                 true
         );
         String owner = boundedOptionalString(arguments, "owner", MAX_SELECTOR_LENGTH);
@@ -342,19 +525,56 @@ public final class SearchMembersTool implements McpTool {
                     "at least one of owner, name, or descriptor is required"
             );
         }
-        boolean regex = ToolArguments.bool(arguments, "regex", false);
+        boolean regexFlag = ToolArguments.bool(arguments, "regex", false);
+        String matchValue = ToolArguments.optionalString(arguments, "match");
+        SearchToolSupport.MatchMode matchMode;
+        if (matchValue == null) {
+            matchMode = regexFlag
+                    ? SearchToolSupport.MatchMode.REGEX
+                    : SearchToolSupport.MatchMode.EXACT;
+        } else {
+            matchMode = SearchToolSupport.MatchMode.from(matchValue);
+            if (regexFlag && matchMode != SearchToolSupport.MatchMode.REGEX) {
+                throw new IllegalArgumentException(
+                        "regex=true cannot be combined with match=" + matchValue
+                );
+            }
+        }
+        boolean regex = matchMode == SearchToolSupport.MatchMode.REGEX;
+        String descMatchValue = ToolArguments.optionalString(arguments, "descriptor_match");
+        SearchToolSupport.MatchMode descriptorMatchMode;
+        if (descMatchValue != null) {
+            descriptorMatchMode = SearchToolSupport.MatchMode.from(descMatchValue);
+        } else if (regex && descriptor != null && !containsDescriptorRegexMetachar(descriptor)) {
+            descriptorMatchMode = SearchToolSupport.MatchMode.EXACT;
+        } else {
+            descriptorMatchMode = matchMode;
+        }
         String kind = enumArgument(arguments, "kind", "any", MEMBER_KINDS);
         String results = enumArgument(arguments, "results", "both", RESULT_SCOPES);
         String filter = boundedOptionalString(arguments, "filter", MAX_FILTER_LENGTH);
         if (regex) {
             SearchToolSupport.validateRegex(owner, "owner");
             SearchToolSupport.validateRegex(name, "name");
+        } else {
+            if (owner != null && owner.contains("\\u")) {
+                owner = JasmEscapeSupport.unescapeSafeIdentifierUnicode(owner);
+            }
+            if (name != null && name.contains("\\u")) {
+                name = JasmEscapeSupport.unescapeSafeIdentifierUnicode(name);
+            }
+        }
+        if (descriptorMatchMode == SearchToolSupport.MatchMode.REGEX) {
             SearchToolSupport.validateRegex(descriptor, "descriptor");
+        } else if (descriptor != null && descriptor.contains("\\u")) {
+            descriptor = JasmEscapeSupport.unescapeSafeIdentifierUnicode(descriptor);
         }
         return new SearchRequest(
                 owner,
                 name,
                 descriptor,
+                matchMode,
+                descriptorMatchMode,
                 regex,
                 kind,
                 results,
@@ -363,6 +583,18 @@ public final class SearchMembersTool implements McpTool {
                 ToolArguments.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE),
                 ToolArguments.integer(arguments, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
         );
+    }
+
+    private static boolean containsDescriptorRegexMetachar(String descriptor) {
+        for (int index = 0; index < descriptor.length(); index++) {
+            char ch = descriptor.charAt(index);
+            if (ch == '^' || ch == '$' && (index == descriptor.length() - 1)
+                    || ch == '*' || ch == '+' || ch == '?' || ch == '.'
+                    || ch == '|' || ch == '\\' || ch == '{' || ch == '}') {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String boundedOptionalString(JsonObject arguments,
@@ -470,17 +702,26 @@ public final class SearchMembersTool implements McpTool {
         if (hit.access() == null) {
             json.add("access", JsonNull.INSTANCE);
         } else {
-            json.addProperty("access", hit.access());
+            int rawAccess = hit.access();
+            boolean isJvm = "jvm".equals(hit.classScope());
+            json.addProperty("access", isJvm ? (rawAccess & 0xFFFF) : rawAccess);
+            if (isJvm && (rawAccess & org.objectweb.asm.Opcodes.ACC_DEPRECATED) != 0) {
+                json.addProperty("deprecated", true);
+            }
         }
         json.addProperty("class_name", hit.className());
         json.addProperty("class_scope", hit.classScope());
         addNullable(json, "dex_name", hit.dexName());
-        addNullable(json, "containing_member_kind", hit.containingMemberKind());
-        addNullable(json, "containing_member_name", hit.containingMemberName());
+        if (hit.resourcePath() != null) {
+            json.addProperty("resource", hit.resourcePath());
+        }
+        boolean isReference = "reference".equals(hit.resultType());
+        addNullable(json, "containing_member_kind", isReference ? hit.containingMemberKind() : null);
+        addNullable(json, "containing_member_name", isReference ? hit.containingMemberName() : null);
         addNullable(
                 json,
                 "containing_member_descriptor",
-                hit.containingMemberDescriptor()
+                isReference ? hit.containingMemberDescriptor() : null
         );
         if (hit.instructionIndex() == null) {
             json.add("instruction_index", JsonNull.INSTANCE);
@@ -501,12 +742,14 @@ public final class SearchMembersTool implements McpTool {
         addNullable(json, "owner", request.owner());
         addNullable(json, "name", request.name());
         addNullable(json, "descriptor", request.descriptor());
+        json.addProperty("match", request.matchMode().jsonName());
         json.addProperty("regex", request.regex());
         json.addProperty("kind", request.kind());
         json.addProperty("results", request.results());
         addNullable(json, "filter", request.filter());
         json.addProperty("requested_scope", request.selection().scope().value());
         addNullable(json, "dex_name", request.selection().dexName());
+        ClassToolSupport.addSelectionMetadata(json, request.selection());
         return json;
     }
 
@@ -534,24 +777,6 @@ public final class SearchMembersTool implements McpTool {
         }
     }
 
-    private static <T extends PathNode<?>> T findPath(PathNode<?> start, Class<T> type) {
-        PathNode<?> current = start;
-        while (current != null) {
-            if (type.isInstance(current)) {
-                return type.cast(current);
-            }
-            current = current.getParent();
-        }
-        return null;
-    }
-
-    private static String exceptionMessage(Throwable throwable) {
-        String message = throwable.getMessage();
-        return message == null || message.isBlank()
-                ? throwable.getClass().getSimpleName()
-                : message;
-    }
-
     private static JsonObject createInputSchema() {
         JsonObject properties = new JsonObject();
         properties.add("owner", selectorProperty(
@@ -561,12 +786,28 @@ public final class SearchMembersTool implements McpTool {
         properties.add("descriptor", selectorProperty(
                 "JVM descriptor selector."
         ));
+        properties.add("match", enumProperty(
+                "Selector matching mode: exact (default), contains (substring), or regex.",
+                MATCH_MODES,
+                "exact"
+        ));
+        JsonObject descriptorMatch = new JsonObject();
+        descriptorMatch.addProperty("type", "string");
+        JsonArray descMatchValues = new JsonArray();
+        MATCH_MODES.stream().sorted().forEach(descMatchValues::add);
+        descriptorMatch.add("enum", descMatchValues);
+        descriptorMatch.addProperty(
+                "description",
+                "Optional override for descriptor matching (literal JVM descriptors like '()V' "
+                        + "default to exact even when match='regex' unless regex metacharacters are used)."
+        );
+        properties.add("descriptor_match", descriptorMatch);
         JsonObject regex = new JsonObject();
         regex.addProperty("type", "boolean");
         regex.addProperty("default", false);
         regex.addProperty(
                 "description",
-                "Apply a partial Java regex to supplied selectors."
+                "Shorthand for match=\"regex\"; applies a partial Java regex to supplied selectors."
         );
         properties.add("regex", regex);
         properties.add("kind", enumProperty(
@@ -584,7 +825,7 @@ public final class SearchMembersTool implements McpTool {
         );
         filter.addProperty("maxLength", MAX_FILTER_LENGTH);
         properties.add("filter", filter);
-        ClassToolSupport.addScopeProperties(properties, true);
+        ClassToolSupport.addScopeProperties(properties, true, true, true);
         properties.add("offset", integerProperty(0, Integer.MAX_VALUE, 0));
         properties.add("limit", integerProperty(1, MAX_LIMIT, DEFAULT_LIMIT));
 
@@ -633,6 +874,8 @@ public final class SearchMembersTool implements McpTool {
     record SearchRequest(String owner,
                          String name,
                          String descriptor,
+                         SearchToolSupport.MatchMode matchMode,
+                         SearchToolSupport.MatchMode descriptorMatchMode,
                          boolean regex,
                          String kind,
                          String results,
@@ -640,6 +883,62 @@ public final class SearchMembersTool implements McpTool {
                          ClassToolSupport.Selection selection,
                          int offset,
                          int limit) {
+        SearchRequest(String owner,
+                      String name,
+                      String descriptor,
+                      SearchToolSupport.MatchMode matchMode,
+                      boolean regex,
+                      String kind,
+                      String results,
+                      String filter,
+                      ClassToolSupport.Selection selection,
+                      int offset,
+                      int limit) {
+            this(
+                    owner,
+                    name,
+                    descriptor,
+                    matchMode,
+                    matchMode,
+                    regex,
+                    kind,
+                    results,
+                    filter,
+                    selection,
+                    offset,
+                    limit
+            );
+        }
+
+        SearchRequest(String owner,
+                      String name,
+                      String descriptor,
+                      boolean regex,
+                      String kind,
+                      String results,
+                      String filter,
+                      ClassToolSupport.Selection selection,
+                      int offset,
+                      int limit) {
+            this(
+                    owner,
+                    name,
+                    descriptor,
+                    regex
+                            ? SearchToolSupport.MatchMode.REGEX
+                            : SearchToolSupport.MatchMode.EXACT,
+                    regex
+                            ? SearchToolSupport.MatchMode.REGEX
+                            : SearchToolSupport.MatchMode.EXACT,
+                    regex,
+                    kind,
+                    results,
+                    filter,
+                    selection,
+                    offset,
+                    limit
+            );
+        }
     }
 
     record MemberHit(String resultType,
@@ -651,6 +950,7 @@ public final class SearchMembersTool implements McpTool {
                      String className,
                      String classScope,
                      String dexName,
+                     String resourcePath,
                      String containingMemberKind,
                      String containingMemberName,
                      String containingMemberDescriptor,
@@ -663,6 +963,37 @@ public final class SearchMembersTool implements McpTool {
             Objects.requireNonNull(descriptor, "descriptor");
             Objects.requireNonNull(className, "className");
             Objects.requireNonNull(classScope, "classScope");
+        }
+
+        MemberHit(String resultType,
+                  String memberKind,
+                  String owner,
+                  String name,
+                  String descriptor,
+                  Integer access,
+                  String className,
+                  String classScope,
+                  String dexName,
+                  String containingMemberKind,
+                  String containingMemberName,
+                  String containingMemberDescriptor,
+                  Integer instructionIndex) {
+            this(
+                    resultType,
+                    memberKind,
+                    owner,
+                    name,
+                    descriptor,
+                    access,
+                    className,
+                    classScope,
+                    dexName,
+                    null,
+                    containingMemberKind,
+                    containingMemberName,
+                    containingMemberDescriptor,
+                    instructionIndex
+            );
         }
 
         MemberHit(String resultType,
@@ -685,6 +1016,7 @@ public final class SearchMembersTool implements McpTool {
                     access,
                     className,
                     ClassToolSupport.Scope.JVM.value(),
+                    null,
                     null,
                     containingMemberKind,
                     containingMemberName,
@@ -711,5 +1043,12 @@ public final class SearchMembersTool implements McpTool {
     @FunctionalInterface
     interface SearchOperation {
         SearchOutcome run(Workspace workspace, SearchRequest request);
+    }
+
+    @FunctionalInterface
+    interface SelectedEntriesSearchOperation {
+        SearchOutcome run(Workspace workspace,
+                          SearchRequest request,
+                          List<ClassToolSupport.Entry> selectedEntries);
     }
 }

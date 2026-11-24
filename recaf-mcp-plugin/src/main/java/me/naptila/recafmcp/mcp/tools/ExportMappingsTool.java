@@ -28,8 +28,19 @@ public final class ExportMappingsTool implements McpTool {
     private static final int DEFAULT_LIMIT = 32 * 1024;
     private static final int MAX_LIMIT = 512 * 1024;
     private static final int MAX_EXPORTED_CHARACTERS = 16 * 1024 * 1024;
+    private static final String DIRECTION_ORIGINAL_TO_CURRENT = "original_to_current";
+    private static final String DIRECTION_TARGET_TO_ORIGINAL = "target_to_original";
+    private static final Set<String> DIRECTIONS = Set.of(
+            DIRECTION_ORIGINAL_TO_CURRENT,
+            DIRECTION_TARGET_TO_ORIGINAL
+    );
+    private static final Set<String> CLASS_HEADER_REQUIRED_FORMATS = Set.of(
+            "tiny-v1",
+            "tiny-v2",
+            "proguard"
+    );
     private static final Set<String> ARGUMENTS = Set.of(
-            "format", "offset", "limit", ConditionalReadSupport.ARGUMENT
+            "format", "direction", "offset", "limit", ConditionalReadSupport.ARGUMENT
     );
 
     private final BooleanSupplier hasWorkspace;
@@ -160,7 +171,12 @@ public final class ExportMappingsTool implements McpTool {
         String text;
         try {
             ToolCancellation.check();
-            text = exportOperation.export(format, mappings);
+            Mappings exportable = prepareMappingsForExport(
+                    descriptor.name(),
+                    request.direction(),
+                    mappings
+            );
+            text = exportOperation.export(format, exportable);
         } catch (Exception ex) {
             ToolCancellation.propagateIfRequested(ex);
             return error(
@@ -199,7 +215,7 @@ public final class ExportMappingsTool implements McpTool {
             );
         }
 
-        JsonObject structured = metadata(request, descriptor);
+        JsonObject structured = metadata(request, descriptor, false);
         MappingToolSupport.addCounts(structured, counts);
         structured.addProperty(
                 "missing_field_descriptors",
@@ -263,7 +279,7 @@ public final class ExportMappingsTool implements McpTool {
                              MappingToolSupport.Descriptor descriptor,
                              AggregatedMappings mappings,
                              Integer generatedCharacters) {
-        JsonObject structured = metadata(request, descriptor);
+        JsonObject structured = metadata(request, descriptor, true);
         if (mappings != null) {
             MappingToolSupport.addCounts(
                     structured,
@@ -286,20 +302,65 @@ public final class ExportMappingsTool implements McpTool {
     }
 
     private JsonObject metadata(Request request,
-                                MappingToolSupport.Descriptor descriptor) {
+                                MappingToolSupport.Descriptor descriptor,
+                                boolean includeAvailableFormats) {
         JsonObject structured = new JsonObject();
-        MappingToolSupport.addFormatMetadata(structured, descriptor, formats);
+        MappingToolSupport.addFormatMetadata(
+                structured,
+                descriptor,
+                formats,
+                includeAvailableFormats
+        );
         structured.addProperty("scope", "aggregate_workspace_mappings");
         structured.addProperty("source", "recaf_aggregate_mapping_manager");
-        structured.addProperty("mapping_direction", "original_to_current");
+        structured.addProperty("mapping_direction", request.direction());
+        if ("Proguard".equalsIgnoreCase(descriptor.name())
+                && DIRECTION_ORIGINAL_TO_CURRENT.equals(request.direction())) {
+            structured.addProperty(
+                    "direction_note",
+                    "Recaf 'Proguard' export uses original_to_current ('original -> current:'); "
+                            + "pass direction=\"target_to_original\" to emit standard ProGuard "
+                            + "'current_clean -> original_obf:' text suitable for retrace or "
+                            + "apply_mappings(format=\"Proguard\")."
+            );
+        }
         structured.addProperty("offset", request.offset());
         structured.addProperty("limit", request.limit());
         return structured;
     }
 
+    private static Mappings prepareMappingsForExport(String formatName,
+                                                     String direction,
+                                                     AggregatedMappings mappings) {
+        boolean invert = DIRECTION_TARGET_TO_ORIGINAL.equals(direction);
+        boolean needsIdentityClassHeaders = CLASS_HEADER_REQUIRED_FORMATS.contains(
+                formatName.toLowerCase(java.util.Locale.ROOT)
+        );
+        if (!invert && !needsIdentityClassHeaders) {
+            return mappings;
+        }
+        software.coley.recaf.services.mapping.IntermediateMappings base =
+                mappings.exportIntermediate();
+        if (invert) {
+            base = MappingMutationSupport.invertIntermediateMappings(base);
+        }
+        if (needsIdentityClassHeaders) {
+            base = MappingMutationSupport.withIdentityOwnerClasses(base);
+        }
+        return base;
+    }
+
     private static Request parseRequest(JsonObject arguments) {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
         String format = ToolArguments.requiredString(arguments, "format");
+        String direction = ToolArguments.optionalString(arguments, "direction");
+        if (direction == null) {
+            direction = DIRECTION_ORIGINAL_TO_CURRENT;
+        } else if (!DIRECTIONS.contains(direction)) {
+            throw new IllegalArgumentException(
+                    "direction must be original_to_current or target_to_original"
+            );
+        }
         int offset = ToolArguments.integer(
                 arguments,
                 "offset",
@@ -315,13 +376,27 @@ public final class ExportMappingsTool implements McpTool {
                 MAX_LIMIT
         );
         String ifSha256 = ConditionalReadSupport.parse(arguments);
-        return new Request(format, offset, limit, ifSha256);
+        return new Request(format, direction, offset, limit, ifSha256);
     }
 
     private static JsonObject createInputSchema(
             List<MappingToolSupport.Descriptor> descriptors) {
         JsonObject properties = new JsonObject();
         properties.add("format", MappingToolSupport.formatProperty(descriptors));
+        JsonObject direction = new JsonObject();
+        direction.addProperty("type", "string");
+        JsonArray directionEnum = new JsonArray();
+        directionEnum.add(DIRECTION_ORIGINAL_TO_CURRENT);
+        directionEnum.add(DIRECTION_TARGET_TO_ORIGINAL);
+        direction.add("enum", directionEnum);
+        direction.addProperty("default", DIRECTION_ORIGINAL_TO_CURRENT);
+        direction.addProperty(
+                "description",
+                "Export mapping orientation. Use target_to_original with format='Proguard' "
+                        + "to emit standard 'clean -> obfuscated:' text compatible with "
+                        + "apply_mappings(format='Proguard') and ProGuard retrace."
+        );
+        properties.add("direction", direction);
         properties.add("offset", integerProperty(0, Integer.MAX_VALUE, 0));
         properties.add("limit", integerProperty(1, MAX_LIMIT, DEFAULT_LIMIT));
         properties.add(
@@ -335,7 +410,10 @@ public final class ExportMappingsTool implements McpTool {
         schema.addProperty("type", "object");
         schema.addProperty(
                 "description",
-                "Returns accumulated mapping text, not a rewritten archive or host file."
+                "Returns accumulated mapping text, not a rewritten archive or host file. "
+                        + "Note: default 'Proguard' export emits 'original -> current:', whereas "
+                        + "apply_mappings(format='Proguard') expects 'target -> current:'; pass "
+                        + "direction='target_to_original' (or use Tiny-V2/Simple/SRG) to round-trip."
         );
         schema.add("properties", properties);
         schema.add("required", required);
@@ -354,9 +432,9 @@ public final class ExportMappingsTool implements McpTool {
         return property;
     }
 
-    record Request(String format, int offset, int limit, String ifSha256) {
+    record Request(String format, String direction, int offset, int limit, String ifSha256) {
         private Request withFormat(String canonicalFormat) {
-            return new Request(canonicalFormat, offset, limit, ifSha256);
+            return new Request(canonicalFormat, direction, offset, limit, ifSha256);
         }
     }
 

@@ -3,9 +3,9 @@ package me.naptila.recafmcp.mcp.tools;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
 import software.coley.recaf.info.AndroidClassInfo;
 import software.coley.recaf.info.ClassInfo;
+import software.coley.recaf.info.FileInfo;
 import software.coley.recaf.info.JvmClassInfo;
 import software.coley.recaf.path.ClassPathNode;
-import software.coley.recaf.path.PathNode;
 import software.coley.recaf.services.inheritance.InheritanceGraph;
 import software.coley.recaf.services.inheritance.InheritanceGraphService;
 import software.coley.recaf.services.mapping.IntermediateMappings;
@@ -131,9 +131,13 @@ final class TargetedMappingApplier {
                 () -> {
                     for (MappingResults result : results) {
                         ToolCancellation.check();
+                        MappingMutationSupport.preserveOriginalClassNames(null, result);
                         result.apply();
+                        MappingMutationSupport.preserveOriginalClassNames(workspace, result);
                     }
-                    aggregateMappingManager.updateAggregateMappings(mappings);
+                    aggregateMappingManager.updateAggregateMappings(
+                            MappingMutationSupport.withCascadedClassRenames(mappings, changes)
+                    );
                 }
         );
     }
@@ -216,7 +220,13 @@ final class TargetedMappingApplier {
                     ));
                 } else {
                     queries.add(new ReferenceQuery(
-                            ownerFamily(graph, method.getOwnerName()),
+                            methodOwnerFamily(
+                                    workspace,
+                                    graph,
+                                    method.getOwnerName(),
+                                    method.getOldName(),
+                                    method.getDesc()
+                            ),
                             exact(method.getOldName()),
                             exact(method.getDesc())
                     ));
@@ -247,8 +257,13 @@ final class TargetedMappingApplier {
                 }
 
                 @Override
+                public boolean doVisitFile(FileInfo fileInfo) {
+                    return false;
+                }
+
+                @Override
                 public boolean doAcceptResult(Result<?> result) {
-                    ClassPathNode classPath = findPath(
+                    ClassPathNode classPath = SearchToolSupport.findPath(
                             result.getPath(),
                             ClassPathNode.class
                     );
@@ -278,8 +293,12 @@ final class TargetedMappingApplier {
                     mappings.doesSupportFieldTypeDifferentiation(),
                     mappings.doesSupportVariableTypeDifferentiation()
             );
-            adapter.importIntermediate(intermediate);
-            adapter.infillMethodFamilies(intermediate, graph);
+            IntermediateMappings expanded = MappingMutationSupport.expandPrimaryOuterInnerAndMethodFamilies(
+                    workspace,
+                    intermediate,
+                    graph
+            );
+            adapter.importIntermediate(expanded);
             adapter.enableClassLookup(workspace);
             adapter.enableHierarchyLookup(graph);
             return adapter;
@@ -312,7 +331,8 @@ final class TargetedMappingApplier {
         Set<String> familyNames = new LinkedHashSet<>();
         familyNames.add(owner);
         graph.getVertexFamily(owner, false).stream()
-                .map(vertex -> vertex.getValue().getName())
+                .map(software.coley.recaf.services.inheritance.InheritanceVertex::getName)
+                .filter(Objects::nonNull)
                 .forEach(familyNames::add);
         return new StringPredicate(
                 "recaf-mcp-owner-family",
@@ -320,16 +340,22 @@ final class TargetedMappingApplier {
         );
     }
 
-    private static <T extends PathNode<?>> T findPath(PathNode<?> start,
-                                                       Class<T> type) {
-        PathNode<?> current = start;
-        while (current != null) {
-            if (type.isInstance(current)) {
-                return type.cast(current);
-            }
-            current = current.getParent();
-        }
-        return null;
+    private static StringPredicate methodOwnerFamily(Workspace workspace,
+                                                     InheritanceGraph graph,
+                                                     String owner,
+                                                     String methodName,
+                                                     String descriptor) {
+        Set<String> familyNames = MethodHierarchySupport.carrierAndDescendantNames(
+                workspace,
+                graph,
+                owner,
+                methodName,
+                descriptor
+        );
+        return new StringPredicate(
+                "recaf-mcp-method-owner-family",
+                familyNames::contains
+        );
     }
 
     record Prepared(MappingMutationSupport.Summary summary,

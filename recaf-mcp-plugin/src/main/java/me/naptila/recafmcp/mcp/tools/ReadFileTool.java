@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.McpTool;
+import me.naptila.recafmcp.mcp.util.Hashing;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import software.coley.android.xml.XmlDecoder;
 import software.coley.recaf.info.ArscFileInfo;
@@ -14,6 +15,7 @@ import software.coley.recaf.info.properties.builtin.BinaryXmlDecodedProperty;
 import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.util.android.AndroidRes;
 import software.coley.recaf.workspace.model.Workspace;
+import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -24,14 +26,19 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * Reads a bounded text or Base64 page from one exact primary-resource file.
+ * Reads a bounded text or Base64 page from one exact primary or embedded file.
  */
 public final class ReadFileTool implements McpTool {
     private static final int DEFAULT_LIMIT = 32 * 1024;
     private static final int MAX_LIMIT = 512 * 1024;
     private static final int MAX_PATH_LENGTH = 4_000;
     private static final Set<String> ARGUMENTS = Set.of(
-            "path", "format", "offset", "limit", ConditionalReadSupport.ARGUMENT
+            "path",
+            "format",
+            ClassToolSupport.RESOURCE_ARGUMENT,
+            "offset",
+            "limit",
+            ConditionalReadSupport.ARGUMENT
     );
     private static final Set<String> FORMATS = Set.of("auto", "text", "base64");
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
@@ -70,6 +77,10 @@ public final class ReadFileTool implements McpTool {
         if (path.length() > MAX_PATH_LENGTH) {
             throw new IllegalArgumentException("path is too long");
         }
+        String resourcePath = ToolArguments.optionalString(
+                arguments,
+                ClassToolSupport.RESOURCE_ARGUMENT
+        );
         String requestedFormat = ToolArguments.optionalString(arguments, "format");
         if (requestedFormat == null) {
             requestedFormat = "auto";
@@ -86,16 +97,97 @@ public final class ReadFileTool implements McpTool {
                 MAX_LIMIT
         );
         if (!hasWorkspace.getAsBoolean()) {
-            return error("workspace not open", path, requestedFormat);
+            return error("workspace not open", path, requestedFormat, resourcePath);
         }
 
         Workspace workspace = workspaceSupplier.get();
+        WorkspaceResource primary = workspace.getPrimaryResource();
+        if (resourcePath != null
+                && ClassToolSupport.resolveEmbeddedResource(primary, resourcePath) == null) {
+            String message = "embedded resource not found: " + resourcePath;
+            JsonObject structured = errorMetadata(path, requestedFormat, resourcePath);
+            structured.addProperty("error", message);
+            JsonArray available = new JsonArray();
+            ClassToolSupport.embeddedResources(primary).stream()
+                    .map(ClassToolSupport.ScopedResource::path)
+                    .limit(200)
+                    .forEach(available::add);
+            structured.add("available_embedded_resources", available);
+            return McpTool.errorResult(message, structured);
+        }
+
         FileToolSupport.Entry entry = FileToolSupport.exact(
-                workspace.getPrimaryResource(),
+                primary,
+                resourcePath,
                 path
         );
         if (entry == null) {
-            return error("file not found in primary resource", path, requestedFormat);
+            String candidateMountedPath = resourcePath == null
+                    ? path
+                    : resourcePath + "!/" + path;
+            WorkspaceResource embeddedMatch = ClassToolSupport.resolveEmbeddedResource(
+                    primary,
+                    candidateMountedPath
+            );
+            if (embeddedMatch instanceof software.coley.recaf.workspace.model.resource.WorkspaceFileResource embeddedFile) {
+                String hint = "Path names a mounted embedded archive; pass resource=\""
+                        + candidateMountedPath + "\" to list_files or read_file entries inside it, or "
+                        + "format=\"base64\" to read raw archive bytes.";
+                byte[] embeddedBytes = embeddedFile.getFileInfo().getRawContent();
+                if ("base64".equals(requestedFormat)
+                        && embeddedBytes != null
+                        && embeddedBytes.length > 0) {
+                    String rawSha256 = FileToolSupport.sha256(embeddedBytes);
+                    JsonObject structured = new JsonObject();
+                    structured.addProperty("path", path);
+                    if (resourcePath != null) {
+                        structured.addProperty("resource", resourcePath);
+                    }
+                    structured.addProperty("mounted_resource", candidateMountedPath);
+                    structured.addProperty("size_bytes", embeddedBytes.length);
+                    structured.addProperty(
+                            "scope",
+                            resourcePath == null ? "primary_embedded_archive" : "nested_embedded_archive"
+                    );
+                    structured.addProperty("embedded_archive", true);
+                    structured.addProperty("embedded_resource_hint", hint);
+                    structured.addProperty("requested_format", requestedFormat);
+                    structured.addProperty("format", "base64");
+                    structured.addProperty("raw_sha256", rawSha256);
+                    structured.addProperty("content_sha256", rawSha256);
+                    structured.addProperty("sha256", rawSha256);
+                    if (ConditionalReadSupport.matches(ifSha256, rawSha256)) {
+                        structured.addProperty("decoded", false);
+                        structured.addProperty("encoding", "base64");
+                        ConditionalReadSupport.markUnchanged(structured);
+                        return McpTool.successResult("file unchanged: " + candidateMountedPath, structured);
+                    }
+                    structured.addProperty("offset", offset);
+                    structured.addProperty("limit", limit);
+                    addBase64Page(structured, embeddedBytes, offset, limit);
+                    return McpTool.successResult(
+                            "read " + structured.get("returned").getAsInt()
+                                    + " bytes from embedded archive " + candidateMountedPath,
+                            structured
+                    );
+                }
+                String message = "path is a mounted embedded archive; pass resource=\""
+                        + candidateMountedPath + "\" to inspect its contents, or format=\"base64\" for raw bytes";
+                JsonObject structured = errorMetadata(path, requestedFormat, resourcePath);
+                structured.addProperty("mounted_resource", candidateMountedPath);
+                structured.addProperty("is_embedded_resource", true);
+                structured.addProperty("embedded_resource_hint", hint);
+                structured.addProperty("error", message);
+                return McpTool.errorResult(message, structured);
+            }
+            return error(
+                    resourcePath == null
+                            ? "file not found in primary resource"
+                            : "file not found in embedded resource",
+                    path,
+                    requestedFormat,
+                    resourcePath
+            );
         }
         FileInfo fileInfo = entry.fileInfo();
         String selectedFormat = requestedFormat.equals("auto")
@@ -103,7 +195,7 @@ public final class ReadFileTool implements McpTool {
                 : requestedFormat;
         if (selectedFormat.equals("text")
                 && !FileToolSupport.isTextAvailable(fileInfo)) {
-            JsonObject structured = errorMetadata(path, requestedFormat);
+            JsonObject structured = errorMetadata(path, requestedFormat, resourcePath);
             FileToolSupport.addSummary(structured, entry);
             JsonArray available = new JsonArray();
             available.add("base64");
@@ -116,38 +208,61 @@ public final class ReadFileTool implements McpTool {
         }
 
         byte[] rawContent = fileInfo.getRawContent();
+        String rawSha256 = FileToolSupport.sha256(rawContent);
         JsonObject structured = new JsonObject();
         FileToolSupport.addSummary(structured, entry);
-        structured.addProperty("scope", "primary_files");
+        structured.addProperty(
+                "scope",
+                resourcePath == null ? "primary_files" : "embedded_files"
+        );
         structured.addProperty("requested_format", requestedFormat);
         structured.addProperty("format", selectedFormat);
-        String sha256 = FileToolSupport.sha256(rawContent);
-        structured.addProperty("sha256", sha256);
-        if (ConditionalReadSupport.matches(ifSha256, sha256)) {
-            ConditionalReadSupport.markUnchanged(structured);
-            return McpTool.successResult("file unchanged: " + path, structured);
-        }
-        structured.addProperty("offset", offset);
-        structured.addProperty("limit", limit);
+        structured.addProperty("raw_sha256", rawSha256);
+
         if (selectedFormat.equals("text")) {
+            TextContent content;
             try {
-                addTextPage(structured, textContent(workspace, fileInfo), offset, limit);
+                content = textContent(workspace, fileInfo);
             } catch (RuntimeException ex) {
-                JsonObject error = errorMetadata(path, requestedFormat);
+                JsonObject error = errorMetadata(path, requestedFormat, resourcePath);
                 FileToolSupport.addSummary(error, entry);
                 error.addProperty("format", "text");
-                error.addProperty("error", "failed to decode Android binary XML; "
-                        + "use format=base64");
+                error.addProperty("raw_sha256", rawSha256);
+                String failMsg = fileInfo instanceof ArscFileInfo
+                        ? "failed to decode Android resources.arsc table; use format=base64"
+                        : "failed to decode Android binary XML; use format=base64";
+                error.addProperty("error", failMsg);
                 error.addProperty("decode_error_type", ex.getClass().getSimpleName());
                 JsonArray available = new JsonArray();
                 available.add("base64");
                 error.add("available_formats", available);
-                return McpTool.errorResult(
-                        "failed to decode Android binary XML; use format=base64",
-                        error
-                );
+                return McpTool.errorResult(failMsg, error);
             }
+            String contentSha256 = Hashing.sha256(content.text());
+            structured.addProperty("content_sha256", contentSha256);
+            structured.addProperty("sha256", contentSha256);
+            if (ConditionalReadSupport.matches(ifSha256, contentSha256)) {
+                structured.addProperty("decoded", content.decoded());
+                structured.addProperty("text_source", content.source());
+                structured.addProperty("encoding", content.encoding());
+                structured.addProperty("size_characters", content.text().length());
+                ConditionalReadSupport.markUnchanged(structured);
+                return McpTool.successResult("file unchanged: " + path, structured);
+            }
+            structured.addProperty("offset", offset);
+            structured.addProperty("limit", limit);
+            addTextPage(structured, content, offset, limit);
         } else {
+            structured.addProperty("content_sha256", rawSha256);
+            structured.addProperty("sha256", rawSha256);
+            if (ConditionalReadSupport.matches(ifSha256, rawSha256)) {
+                structured.addProperty("decoded", false);
+                structured.addProperty("encoding", "base64");
+                ConditionalReadSupport.markUnchanged(structured);
+                return McpTool.successResult("file unchanged: " + path, structured);
+            }
+            structured.addProperty("offset", offset);
+            structured.addProperty("limit", limit);
             addBase64Page(structured, rawContent, offset, limit);
         }
         return McpTool.successResult(
@@ -193,7 +308,87 @@ public final class ReadFileTool implements McpTool {
                     true
             );
         }
+        if (fileInfo instanceof ArscFileInfo arscFileInfo) {
+            return new TextContent(
+                    decodeArscSummary(arscFileInfo),
+                    StandardCharsets.UTF_8.name(),
+                    "recaf_android_arsc_decoder",
+                    true
+            );
+        }
         throw new IllegalArgumentException("file has no text representation");
+    }
+
+    private static String decodeArscSummary(ArscFileInfo arscFileInfo) {
+        StringBuilder out = new StringBuilder(4096);
+        out.append("# Android Resource Table (resources.arsc)\n");
+        var model = arscFileInfo.getChunkModel();
+        com.google.devrel.gmscore.tools.apk.arsc.StringPoolChunk globalPool = null;
+        if (model != null) {
+            for (var chunk : model.getChunks()) {
+                if (chunk instanceof com.google.devrel.gmscore.tools.apk.arsc.ResourceTableChunk tableChunk) {
+                    globalPool = tableChunk.getStringPool();
+                    var packages = tableChunk.getPackages();
+                    out.append("packages: ").append(packages.size()).append('\n');
+                    for (var pkg : packages) {
+                        out.append("package 0x")
+                                .append(Integer.toHexString(pkg.getId()))
+                                .append(": ")
+                                .append(pkg.getPackageName())
+                                .append('\n');
+                    }
+                }
+            }
+        }
+        AndroidRes res = arscFileInfo.getResourceInfo();
+        java.util.List<AndroidRes.ResourceEntry> entries = new java.util.ArrayList<>();
+        if (res != null && res.getEntriesByType() != null) {
+            res.getEntriesByType().values().forEach(entries::addAll);
+        }
+        entries.sort(java.util.Comparator.comparingInt(AndroidRes.ResourceEntry::id));
+        out.append("resource_entries: ").append(entries.size()).append('\n');
+        if (!entries.isEmpty()) {
+            out.append("\n## Entries\n");
+            for (AndroidRes.ResourceEntry item : entries) {
+                out.append(String.format("0x%08x @%s/%s", item.id(), item.type(), item.name()));
+                if (item.stringValue() != null) {
+                    out.append(" = \"").append(escapeSingleLine(item.stringValue())).append('"');
+                } else if (item.resourcePath() != null) {
+                    out.append(" -> ").append(item.resourcePath());
+                } else if (item.simpleValue() != null) {
+                    out.append(" = ").append(item.simpleValue().type())
+                            .append("(0x")
+                            .append(Integer.toHexString(item.simpleValue().data()))
+                            .append(')');
+                } else if (item.isComplex() && item.complexValues() != null) {
+                    out.append(" [bag:").append(item.complexValues().size()).append(" items]");
+                }
+                out.append('\n');
+            }
+        } else if (globalPool != null && globalPool.getStringCount() > 0) {
+            int count = globalPool.getStringCount();
+            int cap = Math.min(count, 2000);
+            out.append("string_pool_count: ").append(count).append("\n\n## String Pool\n");
+            for (int i = 0; i < cap; i++) {
+                out.append('[').append(i).append("] \"")
+                        .append(escapeSingleLine(globalPool.getString(i)))
+                        .append("\"\n");
+            }
+            if (count > cap) {
+                out.append("... (").append(count - cap).append(" more strings)\n");
+            }
+        }
+        return out.toString();
+    }
+
+    private static String escapeSingleLine(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n");
     }
 
     private static void addTextPage(JsonObject target,
@@ -249,17 +444,26 @@ public final class ReadFileTool implements McpTool {
 
     private static JsonObject error(String message,
                                     String path,
-                                    String requestedFormat) {
-        JsonObject structured = errorMetadata(path, requestedFormat);
+                                    String requestedFormat,
+                                    String resourcePath) {
+        JsonObject structured = errorMetadata(path, requestedFormat, resourcePath);
         structured.addProperty("error", message);
         return McpTool.errorResult(message, structured);
     }
 
-    private static JsonObject errorMetadata(String path, String requestedFormat) {
+    private static JsonObject errorMetadata(String path,
+                                            String requestedFormat,
+                                            String resourcePath) {
         JsonObject structured = new JsonObject();
         structured.addProperty("path", path);
         structured.addProperty("requested_format", requestedFormat);
-        structured.addProperty("scope", "primary_files");
+        structured.addProperty(
+                "scope",
+                resourcePath == null ? "primary_files" : "embedded_files"
+        );
+        if (resourcePath != null) {
+            structured.addProperty("resource", resourcePath);
+        }
         return structured;
     }
 
@@ -285,6 +489,7 @@ public final class ReadFileTool implements McpTool {
                 "auto: text or decoded Android XML when available; base64: raw bytes."
         );
         properties.add("format", format);
+        ClassToolSupport.addResourceProperty(properties);
         properties.add("offset", integerProperty(0, Integer.MAX_VALUE, 0));
         properties.add("limit", integerProperty(1, MAX_LIMIT, DEFAULT_LIMIT));
         properties.add(

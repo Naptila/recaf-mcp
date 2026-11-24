@@ -7,6 +7,7 @@ import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.workspace.model.Workspace;
+import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.util.List;
 import java.util.Objects;
@@ -15,13 +16,19 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * Returns a stable, bounded page of primary-resource JVM or Android classes.
+ * Returns a stable, bounded page of primary or embedded JVM/Android classes.
  */
 public final class ListClassesTool implements McpTool {
     private static final int DEFAULT_LIMIT = 20;
     private static final int MAX_LIMIT = 500;
     private static final Set<String> ARGUMENTS = Set.of(
-            "filter", "scope", "dex_name", "offset", "limit"
+            "filter",
+            "scope",
+            "dex_name",
+            ClassToolSupport.RESOURCE_ARGUMENT,
+            ClassToolSupport.INCLUDE_EMBEDDED_ARGUMENT,
+            "offset",
+            "limit"
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
 
@@ -44,7 +51,7 @@ public final class ListClassesTool implements McpTool {
 
     @Override
     public String description() {
-        return "List primary JVM and/or Android classes.";
+        return "List JVM and/or Android classes in the primary or embedded resources.";
     }
 
     @Override
@@ -56,7 +63,11 @@ public final class ListClassesTool implements McpTool {
     public JsonObject execute(JsonObject arguments) {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
         String filter = ToolArguments.optionalString(arguments, "filter");
-        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true);
+        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(
+                arguments,
+                true,
+                true
+        );
         int offset = ToolArguments.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
         int limit = ToolArguments.integer(arguments, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT);
         if (!hasWorkspace.getAsBoolean()) {
@@ -65,8 +76,14 @@ public final class ListClassesTool implements McpTool {
             return McpTool.errorResult("workspace not open", error);
         }
 
+        WorkspaceResource primary = workspaceSupplier.get().getPrimaryResource();
+        JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
+        if (selectionError != null) {
+            return selectionError;
+        }
+
         List<ClassToolSupport.Entry> entries = ClassToolSupport.entries(
-                        workspaceSupplier.get().getPrimaryResource(),
+                        primary,
                         selection
                 )
                 .stream()
@@ -89,7 +106,7 @@ public final class ListClassesTool implements McpTool {
         structuredContent.add("class_entries", classEntries);
         structuredContent.addProperty(
                 "scope",
-                ClassToolSupport.outputScope(selection.scope(), false)
+                ClassToolSupport.outputScope(selection.scope(), false, selection)
         );
         structuredContent.addProperty("requested_scope", selection.scope().value());
         if (selection.dexName() == null) {
@@ -97,6 +114,8 @@ public final class ListClassesTool implements McpTool {
         } else {
             structuredContent.addProperty("dex_name", selection.dexName());
         }
+        ClassToolSupport.addSelectionMetadata(structuredContent, selection);
+        ClassToolSupport.addScopeDiagnostics(structuredContent, primary, selection);
         if (filter == null) {
             structuredContent.add("filter", JsonNull.INSTANCE);
         } else {
@@ -135,7 +154,7 @@ public final class ListClassesTool implements McpTool {
         limit.addProperty("maximum", MAX_LIMIT);
         limit.addProperty("default", DEFAULT_LIMIT);
         properties.add("limit", limit);
-        ClassToolSupport.addScopeProperties(properties, true);
+        ClassToolSupport.addScopeProperties(properties, true, true, true);
 
         JsonObject schema = new JsonObject();
         schema.addProperty("type", "object");

@@ -24,7 +24,12 @@ public final class GetMethodAssemblyTool implements McpTool {
     private static final int MAX_MEMBER_NAME_LENGTH = 1_000;
     private static final int MAX_DESCRIPTOR_LENGTH = 4_000;
     private static final Set<String> ARGUMENTS = Set.of(
-            "owner", "name", "descriptor", "scope", "dex_name",
+            "owner",
+            "name",
+            "descriptor",
+            "scope",
+            "dex_name",
+            ClassToolSupport.RESOURCE_ARGUMENT,
             ConditionalReadSupport.ARGUMENT
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
@@ -73,17 +78,37 @@ public final class GetMethodAssemblyTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        var primary = workspace.getPrimaryResource();
+        JsonObject selectionError = ClassToolSupport.validateSelection(
+                primary,
+                request.selection()
+        );
+        if (selectionError != null) {
+            return selectionError;
+        }
         List<ClassToolSupport.Entry> matches = ClassToolSupport.exact(
-                workspace.getPrimaryResource(),
+                primary,
                 request.selection(),
                 request.owner()
         );
         if (matches.isEmpty()) {
-            return error(
-                    "owner class not found in requested primary scope",
+            JsonObject err = error(
+                    "owner class not found in requested scope",
                     request,
                     List.of()
             );
+            ClassToolSupport.addScopeDiagnostics(
+                    err.getAsJsonObject("structuredContent"),
+                    primary,
+                    request.selection()
+            );
+            ClassToolSupport.addDidYouMeanClasses(
+                    err.getAsJsonObject("structuredContent"),
+                    primary,
+                    request.selection(),
+                    request.owner()
+            );
+            return err;
         }
         if (matches.size() > 1) {
             return error(
@@ -98,18 +123,28 @@ public final class GetMethodAssemblyTool implements McpTool {
             return executeAndroid(workspace, request, entry);
         }
 
+        var targetResource = entry.resource() == null ? primary : entry.resource();
         MethodAssemblySupport.Target target = MethodAssemblySupport.resolve(
                 workspace,
-                request.owner(),
+                targetResource,
+                entry.className(),
                 request.name(),
                 request.descriptor()
         );
         if (target == null) {
-            return error(
+            JsonObject err = error(
                     "method with exact name and descriptor not found in owner class",
                     request,
                     List.of()
             );
+            ClassToolSupport.addDidYouMeanMembers(
+                    err.getAsJsonObject("structuredContent"),
+                    entry.classInfo(),
+                    request.name(),
+                    request.descriptor(),
+                    true
+            );
+            return err;
         }
 
         MethodAssemblySupport.OperationResult<String> disassembly;
@@ -142,6 +177,9 @@ public final class GetMethodAssemblyTool implements McpTool {
         }
 
         JsonObject structured = metadata(request);
+        structured.addProperty("owner", entry.className());
+        structured.addProperty("name", target.method().getName());
+        structured.addProperty("descriptor", target.method().getDescriptor());
         ClassToolSupport.addIdentity(structured, entry);
         structured.addProperty("assembly", assembly);
         structured.addProperty(
@@ -152,12 +190,24 @@ public final class GetMethodAssemblyTool implements McpTool {
                 "class_sha256",
                 MethodAssemblySupport.sha256(target.classInfo().getBytecode())
         );
-        structured.addProperty("access", target.method().getAccess());
+        int rawAccess = target.method().getAccess();
+        structured.addProperty("access", rawAccess & 0xFFFF);
+        if ((rawAccess & org.objectweb.asm.Opcodes.ACC_DEPRECATED) != 0) {
+            structured.addProperty("deprecated", true);
+        }
         structured.addProperty("classfile_version", target.classInfo().getVersion());
         structured.add("dex_version", JsonNull.INSTANCE);
         structured.addProperty("assembly_format", "recaf_jasm_method");
-        structured.addProperty("editable", true);
-        structured.addProperty("patch_supported", true);
+        boolean editable = entry.resourcePath() == null;
+        structured.addProperty("editable", editable);
+        structured.addProperty("patch_supported", editable);
+        if (!editable) {
+            structured.addProperty(
+                    "editable_reason",
+                    "Methods inside embedded JAR resources are read-only; "
+                            + "patch_instructions targets primary-resource classes only."
+            );
+        }
         structured.addProperty("patch_tool", "patch_instructions");
         MethodAssemblySupport.addDiagnostics(structured, disassembly.diagnostics());
         if (ConditionalReadSupport.matches(
@@ -179,20 +229,36 @@ public final class GetMethodAssemblyTool implements McpTool {
                 request.descriptor()
         );
         if (method == null) {
-            return error(
+            JsonObject err = error(
                     "method with exact name and descriptor not found in owner class",
                     request,
                     List.of()
             );
+            ClassToolSupport.addDidYouMeanMembers(
+                    err.getAsJsonObject("structuredContent"),
+                    entry.classInfo(),
+                    request.name(),
+                    request.descriptor(),
+                    true
+            );
+            return err;
         }
         List<AndroidInstructionSupport.InstructionLine> instructions =
                 AndroidInstructionSupport.instructions(method);
         String assembly;
         String classHash;
+        var targetRes = entry.resource() == null
+                ? workspace.getPrimaryResource()
+                : entry.resource();
+        int dexVersion;
         try {
-            assembly = AndroidAssemblySupport.disassemble(entry.classInfo().asAndroidClass(), request.name(), request.descriptor());
-            int version = workspace.getPrimaryResource().getAndroidClassBundles().get(entry.dexName()).getVersion();
-            classHash = MethodAssemblySupport.sha256(AndroidAssemblySupport.bytes(entry.classInfo().asAndroidClass(), version));
+            assembly = AndroidAssemblySupport.disassemble(
+                    entry.classInfo().asAndroidClass(),
+                    method.name(),
+                    method.descriptor()
+            );
+            dexVersion = targetRes.getAndroidClassBundles().get(entry.dexName()).getVersion();
+            classHash = MethodAssemblySupport.sha256(AndroidAssemblySupport.bytes(entry.classInfo().asAndroidClass(), dexVersion));
         } catch (Exception ex) {
             ToolCancellation.propagateIfRequested(ex);
             return error("Dalvik disassembly failed: " + MethodAssemblySupport.exceptionMessage(ex), request, List.of());
@@ -204,11 +270,10 @@ public final class GetMethodAssemblyTool implements McpTool {
                     List.of()
             );
         }
-        int dexVersion = workspace.getPrimaryResource()
-                .getAndroidClassBundles()
-                .get(entry.dexName())
-                .getVersion();
         JsonObject structured = metadata(request);
+        structured.addProperty("owner", entry.className());
+        structured.addProperty("name", method.name());
+        structured.addProperty("descriptor", method.descriptor());
         ClassToolSupport.addIdentity(structured, entry);
         structured.addProperty("assembly", assembly);
         structured.addProperty(
@@ -220,8 +285,16 @@ public final class GetMethodAssemblyTool implements McpTool {
         structured.add("classfile_version", JsonNull.INSTANCE);
         structured.addProperty("dex_version", dexVersion);
         structured.addProperty("assembly_format", "recaf_jasm_dalvik_method");
-        structured.addProperty("editable", true);
-        structured.addProperty("patch_supported", true);
+        boolean editable = entry.resourcePath() == null;
+        structured.addProperty("editable", editable);
+        structured.addProperty("patch_supported", editable);
+        if (!editable) {
+            structured.addProperty(
+                    "editable_reason",
+                    "Methods inside embedded JAR resources are read-only; "
+                            + "patch_instructions targets primary-resource classes only."
+            );
+        }
         structured.addProperty("patch_tool", "patch_instructions");
         structured.addProperty("instruction_count", instructions.size());
         if (method.code() == null) {
@@ -322,7 +395,7 @@ public final class GetMethodAssemblyTool implements McpTool {
                 ConditionalReadSupport.ARGUMENT,
                 ConditionalReadSupport.schemaProperty()
         );
-        ClassToolSupport.addScopeProperties(properties, false);
+        ClassToolSupport.addScopeProperties(properties, false, true, false);
         JsonArray required = new JsonArray();
         required.add("owner");
         required.add("name");

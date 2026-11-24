@@ -30,6 +30,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -45,13 +46,23 @@ public final class SearchInstructionsTool implements McpTool {
     private static final int MAX_COLLECTED_RESULTS = 20_000;
     private static final int MAX_FILTER_LENGTH = 500;
     private static final Set<String> ARGUMENTS = Set.of(
-            "text", "regex", "filter", "scope", "dex_name", "offset", "limit"
+            "text",
+            "regex",
+            "filter",
+            "scope",
+            "dex_name",
+            ClassToolSupport.RESOURCE_ARGUMENT,
+            ClassToolSupport.INCLUDE_EMBEDDED_ARGUMENT,
+            "offset",
+            "limit"
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
     private static final Comparator<InstructionHit> HIT_ORDER = Comparator
             .comparing(InstructionHit::className)
             .thenComparing(InstructionHit::classScope)
             .thenComparing(InstructionHit::dexName,
+                    Comparator.nullsFirst(String::compareTo))
+            .thenComparing(InstructionHit::resourcePath,
                     Comparator.nullsFirst(String::compareTo))
             .thenComparing(InstructionHit::memberName)
             .thenComparing(InstructionHit::descriptor)
@@ -60,7 +71,7 @@ public final class SearchInstructionsTool implements McpTool {
 
     private final BooleanSupplier hasWorkspace;
     private final Supplier<Workspace> workspaceSupplier;
-    private final ScopedSearchOperation searchOperation;
+    private final SelectedEntriesSearchOperation searchOperation;
 
     public SearchInstructionsTool(WorkspaceManager workspaceManager,
                                   SearchService searchService,
@@ -68,10 +79,33 @@ public final class SearchInstructionsTool implements McpTool {
         this(
                 workspaceManager::hasCurrentWorkspace,
                 workspaceManager::getCurrent,
-                (workspace, request, filter, selection) -> runSearch(
+                (workspace, request, filter, selection, selectedEntries) -> runSearch(
                         workspace,
                         searchService,
                         predicateProvider,
+                        request,
+                        selection,
+                        selectedEntries
+                )
+        );
+    }
+
+    SearchInstructionsTool(BooleanSupplier hasWorkspace,
+                           Supplier<Workspace> workspaceSupplier,
+                           SelectedEntriesSearchOperation searchOperation) {
+        this.hasWorkspace = Objects.requireNonNull(hasWorkspace, "hasWorkspace");
+        this.workspaceSupplier = Objects.requireNonNull(workspaceSupplier, "workspaceSupplier");
+        this.searchOperation = Objects.requireNonNull(searchOperation, "searchOperation");
+    }
+
+    SearchInstructionsTool(BooleanSupplier hasWorkspace,
+                           Supplier<Workspace> workspaceSupplier,
+                           ScopedSearchOperation searchOperation) {
+        this(
+                hasWorkspace,
+                workspaceSupplier,
+                (workspace, request, filter, selection, selectedEntries) -> searchOperation.run(
+                        workspace,
                         request,
                         filter,
                         selection
@@ -81,19 +115,11 @@ public final class SearchInstructionsTool implements McpTool {
 
     SearchInstructionsTool(BooleanSupplier hasWorkspace,
                            Supplier<Workspace> workspaceSupplier,
-                           ScopedSearchOperation searchOperation) {
-        this.hasWorkspace = Objects.requireNonNull(hasWorkspace, "hasWorkspace");
-        this.workspaceSupplier = Objects.requireNonNull(workspaceSupplier, "workspaceSupplier");
-        this.searchOperation = Objects.requireNonNull(searchOperation, "searchOperation");
-    }
-
-    SearchInstructionsTool(BooleanSupplier hasWorkspace,
-                           Supplier<Workspace> workspaceSupplier,
                            SearchOperation searchOperation) {
         this(
                 hasWorkspace,
                 workspaceSupplier,
-                (workspace, request, filter, selection) -> searchOperation.run(
+                (workspace, request, filter, selection, selectedEntries) -> searchOperation.run(
                         workspace,
                         request,
                         filter
@@ -108,13 +134,13 @@ public final class SearchInstructionsTool implements McpTool {
         this(
                 hasWorkspace,
                 workspaceSupplier,
-                (workspace, request, filter, selection) -> runSearch(
+                (workspace, request, filter, selection, selectedEntries) -> runSearch(
                         workspace,
                         searchService,
                         predicateProvider,
                         request,
-                        filter,
-                        selection
+                        selection,
+                        selectedEntries
                 )
         );
     }
@@ -139,6 +165,7 @@ public final class SearchInstructionsTool implements McpTool {
         SearchToolSupport.Request request = SearchToolSupport.parse(arguments, ARGUMENTS);
         ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(
                 arguments,
+                true,
                 true
         );
         String filter = ToolArguments.optionalString(arguments, "filter");
@@ -152,18 +179,26 @@ public final class SearchInstructionsTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
-        int classesSelected = (int) ClassToolSupport.entries(
-                        workspace.getPrimaryResource(),
+        WorkspaceResource primary = workspace.getPrimaryResource();
+        JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
+        if (selectionError != null) {
+            return selectionError;
+        }
+
+        List<ClassToolSupport.Entry> selectedEntries = ClassToolSupport.entries(
+                        primary,
                         selection
                 )
                 .stream()
                 .filter(entry -> filter == null || entry.className().contains(filter))
-                .count();
+                .toList();
+        int classesSelected = selectedEntries.size();
         List<InstructionHit> hits = new ArrayList<>(searchOperation.run(
                 workspace,
                 request,
                 filter,
-                selection
+                selection,
+                selectedEntries
         ));
         hits.sort(HIT_ORDER);
         JsonArray page = new JsonArray();
@@ -177,7 +212,7 @@ public final class SearchInstructionsTool implements McpTool {
         structured.add("hits", page);
         structured.addProperty(
                 "scope",
-                ClassToolSupport.outputScope(selection.scope(), false) + "_instructions"
+                ClassToolSupport.outputScope(selection.scope(), false, selection) + "_instructions"
         );
         structured.addProperty("requested_scope", selection.scope().value());
         if (selection.dexName() == null) {
@@ -185,6 +220,8 @@ public final class SearchInstructionsTool implements McpTool {
         } else {
             structured.addProperty("dex_name", selection.dexName());
         }
+        ClassToolSupport.addSelectionMetadata(structured, selection);
+        ClassToolSupport.addScopeDiagnostics(structured, primary, selection);
         if (filter == null) {
             structured.add("filter", JsonNull.INSTANCE);
         } else {
@@ -206,54 +243,38 @@ public final class SearchInstructionsTool implements McpTool {
                                                   SearchService searchService,
                                                   StringPredicateProvider provider,
                                                   SearchToolSupport.Request request,
-                                                  String filter,
-                                                  ClassToolSupport.Selection selection) {
-        StringPredicate predicate = SearchToolSupport.predicate(
+                                                  ClassToolSupport.Selection selection,
+                                                  List<ClassToolSupport.Entry> selectedEntries) {
+        StringPredicate predicate = SearchToolSupport.unicodeAwarePredicate(
                 provider,
                 request.text(),
                 request.regex()
         );
         InstructionQuery query = new InstructionQuery(List.of(predicate));
         WorkspaceResource primary = workspace.getPrimaryResource();
-        List<ClassToolSupport.Entry> selectedEntries = ClassToolSupport.entries(
-                        primary,
-                        selection
-                )
-                .stream()
-                .filter(entry -> filter == null || entry.className().contains(filter))
-                .toList();
+        Set<WorkspaceResource> allowedResources = Collections.newSetFromMap(
+                new IdentityHashMap<>()
+        );
+        ClassToolSupport.targetResources(primary, selection)
+                .forEach(item -> allowedResources.add(item.resource()));
+
+        Map<ClassInfo, ClassToolSupport.Entry> selectedJvmByClass = new IdentityHashMap<>();
         Set<ClassInfo> selectedJvmClasses = Collections.newSetFromMap(
                 new IdentityHashMap<>()
         );
         selectedEntries.stream()
                 .filter(entry -> entry.scope() == ClassToolSupport.Scope.JVM)
-                .forEach(entry -> selectedJvmClasses.add(entry.classInfo()));
+                .forEach(entry -> {
+                    selectedJvmClasses.add(entry.classInfo());
+                    selectedJvmByClass.put(entry.classInfo(), entry);
+                });
         AtomicInteger accepted = new AtomicInteger();
-        SearchFeedback feedback = new SearchFeedback() {
-            @Override
-            public boolean hasRequestedCancellation() {
-                return ToolCancellation.requested()
-                        || accepted.get() >= MAX_COLLECTED_RESULTS;
-            }
-
-            @Override
-            public boolean doVisitClass(ClassInfo classInfo) {
-                return selectedJvmClasses.contains(classInfo);
-            }
-
-            @Override
-            public boolean doAcceptResult(Result<?> result) {
-                while (true) {
-                    int current = accepted.get();
-                    if (current >= MAX_COLLECTED_RESULTS) {
-                        return false;
-                    }
-                    if (accepted.compareAndSet(current, current + 1)) {
-                        return true;
-                    }
-                }
-            }
-        };
+        SearchFeedback feedback = SearchToolSupport.classOnlyFeedback(
+                selectedJvmClasses,
+                MAX_COLLECTED_RESULTS,
+                accepted,
+                null
+        );
 
         List<InstructionHit> hits = new ArrayList<>();
         if (!selectedJvmClasses.isEmpty()) {
@@ -263,23 +284,23 @@ public final class SearchInstructionsTool implements McpTool {
                     continue;
                 }
                 PathNode<?> path = result.getPath();
-                ResourcePathNode resourcePath = findPath(path, ResourcePathNode.class);
-                ClassPathNode classPath = findPath(path, ClassPathNode.class);
-                ClassMemberPathNode memberPath = findPath(path, ClassMemberPathNode.class);
-                JvmInstructionPathNode instructionPath = findPath(
+                ResourcePathNode resourcePath = SearchToolSupport.findPath(path, ResourcePathNode.class);
+                ClassPathNode classPath = SearchToolSupport.findPath(path, ClassPathNode.class);
+                ClassMemberPathNode memberPath = SearchToolSupport.findPath(path, ClassMemberPathNode.class);
+                JvmInstructionPathNode instructionPath = SearchToolSupport.findPath(
                         path,
                         JvmInstructionPathNode.class
                 );
                 if (resourcePath == null
-                        || resourcePath.getValue() != primary
+                        || !allowedResources.contains(resourcePath.getValue())
                         || classPath == null
                         || !(classPath.getValue() instanceof JvmClassInfo classInfo)
                         || memberPath == null
                         || instructionPath == null) {
                     continue;
                 }
-                ClassToolSupport.Entry entry = ClassToolSupport.identify(primary, classInfo);
-                if (entry == null || !selectedJvmClasses.contains(classInfo)) {
+                ClassToolSupport.Entry entry = selectedJvmByClass.get(classInfo);
+                if (entry == null) {
                     continue;
                 }
                 ClassMember member = memberPath.getValue();
@@ -287,6 +308,7 @@ public final class SearchInstructionsTool implements McpTool {
                         classInfo.getName(),
                         entry.scope().value(),
                         entry.dexName(),
+                        entry.resourcePath(),
                         member.getName(),
                         member.getDescriptor(),
                         instructionPath.getInstructionIndex(),
@@ -296,7 +318,7 @@ public final class SearchInstructionsTool implements McpTool {
             }
         }
 
-        Predicate<String> matcher = SearchToolSupport.matcher(
+        Predicate<String> matcher = SearchToolSupport.unicodeAwareMatcher(
                 request.text(),
                 request.regex()
         );
@@ -319,6 +341,7 @@ public final class SearchInstructionsTool implements McpTool {
                             entry.className(),
                             entry.scope().value(),
                             entry.dexName(),
+                            entry.resourcePath(),
                             method.name(),
                             method.descriptor(),
                             instruction.index(),
@@ -340,6 +363,9 @@ public final class SearchInstructionsTool implements McpTool {
         } else {
             json.addProperty("dex_name", hit.dexName());
         }
+        if (hit.resourcePath() != null) {
+            json.addProperty("resource", hit.resourcePath());
+        }
         json.addProperty("member_name", hit.memberName());
         json.addProperty("descriptor", hit.descriptor());
         json.addProperty("instruction_index", hit.instructionIndex());
@@ -359,17 +385,6 @@ public final class SearchInstructionsTool implements McpTool {
         return json;
     }
 
-    private static <T extends PathNode<?>> T findPath(PathNode<?> start, Class<T> type) {
-        PathNode<?> current = start;
-        while (current != null) {
-            if (type.isInstance(current)) {
-                return type.cast(current);
-            }
-            current = current.getParent();
-        }
-        return null;
-    }
-
     private static JsonObject createInputSchema() {
         JsonObject schema = SearchToolSupport.inputSchema(
                 "Instruction literal or partial Java regex."
@@ -384,7 +399,7 @@ public final class SearchInstructionsTool implements McpTool {
         );
         JsonObject properties = schema.getAsJsonObject("properties");
         properties.add("filter", filter);
-        ClassToolSupport.addScopeProperties(properties, true);
+        ClassToolSupport.addScopeProperties(properties, true, true, true);
         return schema;
     }
 
@@ -403,9 +418,19 @@ public final class SearchInstructionsTool implements McpTool {
                                  ClassToolSupport.Selection selection);
     }
 
+    @FunctionalInterface
+    interface SelectedEntriesSearchOperation {
+        List<InstructionHit> run(Workspace workspace,
+                                 SearchToolSupport.Request request,
+                                 String filter,
+                                 ClassToolSupport.Selection selection,
+                                 List<ClassToolSupport.Entry> selectedEntries);
+    }
+
     record InstructionHit(String className,
                           String classScope,
                           String dexName,
+                          String resourcePath,
                           String memberName,
                           String descriptor,
                           int instructionIndex,
@@ -420,6 +445,27 @@ public final class SearchInstructionsTool implements McpTool {
         }
 
         InstructionHit(String className,
+                       String classScope,
+                       String dexName,
+                       String memberName,
+                       String descriptor,
+                       int instructionIndex,
+                       Integer dexOffset,
+                       String instruction) {
+            this(
+                    className,
+                    classScope,
+                    dexName,
+                    null,
+                    memberName,
+                    descriptor,
+                    instructionIndex,
+                    dexOffset,
+                    instruction
+            );
+        }
+
+        InstructionHit(String className,
                        String memberName,
                        String descriptor,
                        int instructionIndex,
@@ -427,6 +473,7 @@ public final class SearchInstructionsTool implements McpTool {
             this(
                     className,
                     ClassToolSupport.Scope.JVM.value(),
+                    null,
                     null,
                     memberName,
                     descriptor,

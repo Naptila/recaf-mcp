@@ -118,20 +118,26 @@ public final class RunRecafScriptTool implements McpTool {
     public JsonObject execute(JsonObject arguments) {
         Request request = parseRequest(arguments);
         if (!hasWorkspace.getAsBoolean()) {
-            return error("workspace not open", request, null);
+            return error("workspace not open", null, request, null);
         }
 
+        Workspace workspace = workspaceSupplier.get();
         ScriptExecution execution;
         try {
-            execution = operation.run(workspaceSupplier.get(), request);
+            execution = operation.run(workspace, request);
         } catch (Exception ex) {
             ToolCancellation.propagateIfRequested(ex);
-            JsonObject result = error("Recaf script operation failed: " + exceptionMessage(ex), request, null);
+            JsonObject result = error(
+                    "Recaf script operation failed: " + exceptionMessage(ex),
+                    workspace,
+                    request,
+                    null
+            );
             addRuntimeFailure(result.getAsJsonObject("structuredContent"), describeRuntimeFailure(ex));
             return result;
         }
 
-        JsonObject structured = resultJson(request, execution);
+        JsonObject structured = resultJson(workspace, request, execution);
         if (!execution.compileSuccess()) {
             structured.addProperty("error", "Recaf rejected the script during compilation");
             return McpTool.errorResult(
@@ -170,18 +176,34 @@ public final class RunRecafScriptTool implements McpTool {
                                              Workspace workspace,
                                              Request request) throws Exception {
         WorkspaceResource primary = workspace.getPrimaryResource();
-        ChangeTracker tracker = new ChangeTracker(primary);
-        primary.addResourceJvmClassListener(tracker);
-        primary.addResourceAndroidClassListener(tracker);
+        int dirtyBefore = WorkspaceInfoTool.countDirtyItems(primary);
+        int removedBefore = WorkspaceInfoTool.countRemovedItems(primary);
+        List<ClassToolSupport.ScopedResource> embeddedResources =
+                ClassToolSupport.embeddedResources(primary);
+        ChangeTracker tracker = new ChangeTracker(primary, embeddedResources);
+        List<WorkspaceResource> observedResources = new ArrayList<>(1 + embeddedResources.size());
+        observedResources.add(primary);
+        for (ClassToolSupport.ScopedResource scoped : embeddedResources) {
+            observedResources.add(scoped.resource());
+        }
+        for (WorkspaceResource observed : observedResources) {
+            observed.addResourceJvmClassListener(tracker);
+            observed.addResourceAndroidClassListener(tracker);
+        }
         CapturedExecution captured;
         RestorationOutcome restoration = new RestorationOutcome(false, false, null);
         try {
             captured = captureAndRun(scriptEngine, request);
         } finally {
-            primary.removeResourceJvmClassListener(tracker);
-            primary.removeResourceAndroidClassListener(tracker);
+            for (WorkspaceResource observed : observedResources) {
+                observed.removeResourceJvmClassListener(tracker);
+                observed.removeResourceAndroidClassListener(tracker);
+            }
             restoration = restoreWorkspace(workspaceManager, workspace);
         }
+        int dirtyAfter = WorkspaceInfoTool.countDirtyItems(primary);
+        int removedAfter = WorkspaceInfoTool.countRemovedItems(primary);
+        boolean mutatedBundles = dirtyAfter > dirtyBefore || removedAfter > removedBefore;
         return new ScriptExecution(
                 captured.compileSuccess(),
                 captured.executed(),
@@ -199,7 +221,8 @@ public final class RunRecafScriptTool implements McpTool {
                 tracker.removed(),
                 restoration.changed(),
                 restoration.restored(),
-                restoration.error()
+                restoration.error(),
+                mutatedBundles
         );
     }
 
@@ -419,7 +442,9 @@ public final class RunRecafScriptTool implements McpTool {
         }
     }
 
-    private static JsonObject resultJson(Request request, ScriptExecution execution) {
+    private static JsonObject resultJson(Workspace workspace,
+                                         Request request,
+                                         ScriptExecution execution) {
         JsonObject structured = metadata(request);
         structured.addProperty("compiled", execution.compileSuccess());
         structured.addProperty("executed", execution.executed());
@@ -473,7 +498,7 @@ public final class RunRecafScriptTool implements McpTool {
         addCategory(structured, "added", execution.addedClasses());
         addCategory(structured, "modified", execution.modifiedClasses());
         addCategory(structured, "removed", execution.removedClasses());
-        structured.addProperty("change_observation_scope", "primary_jvm_and_android_bundle_events");
+        structured.addProperty("change_observation_scope", "primary_and_embedded_bundle_events");
         structured.addProperty("workspace_changed", execution.workspaceChanged());
         structured.addProperty("workspace_restored", execution.workspaceRestored());
         if (execution.workspaceRestoreError() != null) {
@@ -483,7 +508,13 @@ public final class RunRecafScriptTool implements McpTool {
             );
         }
         structured.addProperty("atomic", false);
-        structured.addProperty("save_required", true);
+        boolean hasDirtyWorkspaceItems = workspace != null
+                && (WorkspaceInfoTool.countDirtyItems(workspace.getPrimaryResource()) > 0
+                || WorkspaceInfoTool.countRemovedItems(workspace.getPrimaryResource()) > 0);
+        boolean saveRequired = execution.executed()
+                && (!changed.isEmpty() || execution.workspaceChanged() || execution.mutatedBundles());
+        structured.addProperty("save_required", saveRequired);
+        structured.addProperty("workspace_has_unsaved_changes", saveRequired || hasDirtyWorkspaceItems);
         return structured;
     }
 
@@ -505,8 +536,13 @@ public final class RunRecafScriptTool implements McpTool {
         return changed.stream().sorted().toList();
     }
 
-    private static JsonObject error(String message, Request request, ScriptExecution execution) {
-        JsonObject structured = execution == null ? metadata(request) : resultJson(request, execution);
+    private static JsonObject error(String message,
+                                    Workspace workspace,
+                                    Request request,
+                                    ScriptExecution execution) {
+        JsonObject structured = execution == null
+                ? metadata(request)
+                : resultJson(workspace, request, execution);
         structured.addProperty("error", message);
         structured.addProperty("atomic", false);
         return McpTool.errorResult(message, structured);
@@ -675,7 +711,46 @@ public final class RunRecafScriptTool implements McpTool {
                            List<String> removedClasses,
                            boolean workspaceChanged,
                            boolean workspaceRestored,
-                           String workspaceRestoreError) {
+                           String workspaceRestoreError,
+                           boolean mutatedBundles) {
+        ScriptExecution(boolean compileSuccess,
+                        boolean executed,
+                        boolean cancelled,
+                        List<ScriptDiagnostic> diagnostics,
+                        int diagnosticCount,
+                        ScriptRuntimeFailure runtimeFailure,
+                        String stdout,
+                        long stdoutBytes,
+                        boolean stdoutTruncated,
+                        JsonElement scriptResult,
+                        String scriptResultParseError,
+                        List<String> addedClasses,
+                        List<String> modifiedClasses,
+                        List<String> removedClasses,
+                        boolean workspaceChanged,
+                        boolean workspaceRestored,
+                        String workspaceRestoreError) {
+            this(
+                    compileSuccess,
+                    executed,
+                    cancelled,
+                    diagnostics,
+                    diagnosticCount,
+                    runtimeFailure,
+                    stdout,
+                    stdoutBytes,
+                    stdoutTruncated,
+                    scriptResult,
+                    scriptResultParseError,
+                    addedClasses,
+                    modifiedClasses,
+                    removedClasses,
+                    workspaceChanged,
+                    workspaceRestored,
+                    workspaceRestoreError,
+                    false
+            );
+        }
     }
 
     private record CoreExecution(boolean compileSuccess,
@@ -719,9 +794,26 @@ public final class RunRecafScriptTool implements McpTool {
         private final Map<ClassBundle<?>, BundleChanges> bundles = new IdentityHashMap<>();
 
         ChangeTracker(WorkspaceResource primary) {
-            bundles.put(primary.getJvmClassBundle(), new BundleChanges(primary.getJvmClassBundle()));
-            primary.getAndroidClassBundles().values().forEach(bundle ->
-                    bundles.put(bundle, new BundleChanges(bundle)));
+            this(primary, ClassToolSupport.embeddedResources(primary));
+        }
+
+        ChangeTracker(WorkspaceResource primary,
+                      List<ClassToolSupport.ScopedResource> embeddedResources) {
+            registerResourceBundles(primary, null);
+            for (ClassToolSupport.ScopedResource scoped : embeddedResources) {
+                registerResourceBundles(scoped.resource(), scoped.path() + "!/");
+            }
+        }
+
+        private void registerResourceBundles(WorkspaceResource resource, String prefix) {
+            bundles.put(
+                    resource.getJvmClassBundle(),
+                    new BundleChanges(resource.getJvmClassBundle(), prefix)
+            );
+            resource.getVersionedJvmClassBundles().values().forEach(bundle ->
+                    bundles.put(bundle, new BundleChanges(bundle, prefix)));
+            resource.getAndroidClassBundles().values().forEach(bundle ->
+                    bundles.put(bundle, new BundleChanges(bundle, prefix)));
         }
 
         @Override
@@ -803,25 +895,33 @@ public final class RunRecafScriptTool implements McpTool {
         }
 
         private static final class BundleChanges {
+            private final String prefix;
             private final Set<String> originalNames;
             private final Set<String> added = Collections.synchronizedSet(new HashSet<>());
             private final Set<String> modified = Collections.synchronizedSet(new HashSet<>());
             private final Set<String> removed = Collections.synchronizedSet(new HashSet<>());
 
-            private BundleChanges(ClassBundle<?> bundle) {
+            private BundleChanges(ClassBundle<?> bundle, String prefix) {
+                this.prefix = prefix;
                 originalNames = Set.copyOf(bundle.keySet());
             }
 
+            private String qualify(String name) {
+                return prefix == null ? name : prefix + name;
+            }
+
             private void recordNew(String name) {
-                removed.remove(name);
-                if (originalNames.contains(name)) modified.add(name);
-                else added.add(name);
+                String qualified = qualify(name);
+                removed.remove(qualified);
+                if (originalNames.contains(name)) modified.add(qualified);
+                else added.add(qualified);
             }
 
             private void recordRemoval(String name) {
-                modified.remove(name);
-                if (originalNames.contains(name)) removed.add(name);
-                else added.remove(name);
+                String qualified = qualify(name);
+                modified.remove(qualified);
+                if (originalNames.contains(name)) removed.add(qualified);
+                else added.remove(qualified);
             }
         }
     }

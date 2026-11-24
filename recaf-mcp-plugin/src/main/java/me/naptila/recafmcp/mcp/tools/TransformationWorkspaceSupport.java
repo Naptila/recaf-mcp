@@ -71,14 +71,14 @@ final class TransformationWorkspaceSupport implements AutoCloseable {
         Map<String, JvmClassInfo> originalClasses = new TreeMap<>();
         for (JvmClassInfo info : source.values()) {
             ToolCancellation.check();
-            byte[] code = info.getBytecode().clone();
-            bytes += code.length;
+            byte[] bytecode = info.getBytecode();
+            bytes += bytecode.length;
             if (bytes > MAX_SNAPSHOT_BYTES) {
                 throw new IllegalArgumentException("JVM transformation snapshot exceeds 256 MiB; use a smaller workspace");
             }
-            target.put(new JvmClassInfoBuilder(code, info.getClassReaderFlags()).build());
+            target.put(new JvmClassInfoBuilder(bytecode, info.getClassReaderFlags()).build());
             if (primary) {
-                originalBytes.put(info.getName(), code.clone());
+                originalBytes.put(info.getName(), bytecode.clone());
                 originalClasses.put(info.getName(), info);
             }
         }
@@ -114,30 +114,40 @@ final class TransformationWorkspaceSupport implements AutoCloseable {
 
     void commit(String prefix) {
         // Finish all validation and cancellation checks before the first live write.
-        modifiedClasses(prefix);
-        removedClasses(prefix);
+        Map<JvmClassBundle, List<JvmClassInfo>> stagedUpdates = new IdentityHashMap<>();
+        Map<JvmClassBundle, List<String>> stagedRemovals = new IdentityHashMap<>();
         snapshots.forEach((live, snapshot) -> {
             ToolCancellation.check();
             if (!live.keySet().equals(snapshot.bytes().keySet()) || live.values().stream()
                     .anyMatch(info -> !Arrays.equals(snapshot.bytes().get(info.getName()), info.getBytecode()))) {
                 throw new IllegalStateException("workspace changed while preparing transformations; retry");
             }
+            List<String> removals = new ArrayList<>();
+            for (String name : snapshot.bytes().keySet()) {
+                ToolCancellation.check();
+                if (!snapshot.copy().containsKey(name)) {
+                    requireScope(name, prefix);
+                    removals.add(name);
+                }
+            }
+            List<JvmClassInfo> updates = new ArrayList<>();
+            for (JvmClassInfo info : snapshot.copy()) {
+                ToolCancellation.check();
+                if (!Arrays.equals(snapshot.bytes().get(info.getName()), info.getBytecode())) {
+                    requireScope(info.getName(), prefix);
+                    updates.add(info);
+                }
+            }
+            stagedRemovals.put(live, removals);
+            stagedUpdates.put(live, updates);
         });
         ToolCancellation.check();
         List<JvmClassBundle> written = new ArrayList<>();
         try {
             snapshots.forEach((live, snapshot) -> {
                 written.add(live);
-                for (String name : snapshot.bytes().keySet()) {
-                    if (!snapshot.copy().containsKey(name)) {
-                        live.remove(name);
-                    }
-                }
-                for (JvmClassInfo info : snapshot.copy()) {
-                    if (!Arrays.equals(snapshot.bytes().get(info.getName()), info.getBytecode())) {
-                        live.put(info);
-                    }
-                }
+                stagedRemovals.get(live).forEach(live::remove);
+                stagedUpdates.get(live).forEach(live::put);
             });
         } catch (RuntimeException | Error failure) {
             for (JvmClassBundle live : written) {

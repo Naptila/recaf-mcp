@@ -89,7 +89,9 @@ public final class AndroidArchiveExporter {
                 byte[] replacement = replacements.remove(name);
                 FileInfo file = files.remove(name);
                 if (replacement != null) writer.writeFile(name, replacement, original);
-                else if (original.isDirectory() || file != null && resource.isOriginalFile(name, file)) writer.copy(central);
+                else if (original.isDirectory()
+                        || (file != null && resource.isOriginalFile(name, file))
+                        || (file == null && isUnchangedDexEntry(name))) writer.copy(central);
                 else if (file != null) writer.writeFile(name, file.getRawContent(), properties(name, file, original));
             }
             for (var entry : replacements.entrySet()) writer.writeFile(entry.getKey(), entry.getValue(), null);
@@ -110,8 +112,10 @@ public final class AndroidArchiveExporter {
                 if (signature(name)) continue;
                 byte[] replacement = replacements.remove(name);
                 FileInfo file = files.remove(name);
-                if (replacement == null && file == null && !original.isDirectory()) continue;
-                boolean unchanged = replacement == null && (original.isDirectory() || resource.isOriginalFile(name, file));
+                boolean unchangedDex = replacement == null && file == null && isUnchangedDexEntry(name);
+                if (replacement == null && file == null && !unchangedDex && !original.isDirectory()) continue;
+                boolean unchanged = replacement == null
+                        && (original.isDirectory() || unchangedDex || (file != null && resource.isOriginalFile(name, file)));
                 ZipEntry entry = file != null && !unchanged ? properties(name, file, original)
                         : RawZipWriter.outputEntry(name, original);
                 byte[] content = replacement != null ? replacement : unchanged ? null : file.getRawContent();
@@ -169,12 +173,35 @@ public final class AndroidArchiveExporter {
                 }
             }
         }
+        for (var entry : resource.getAndroidClassBundles().entrySet()) {
+            String name = entry.getKey();
+            if (resource.archive().entries().containsKey(name)
+                    && resource.isOriginalDex(name, entry.getValue())) {
+                var before = resource.archive().entries().get(name);
+                var after = zip.getEntry(name);
+                if (after == null || before.getSize() != after.getSize() || before.getCrc() != after.getCrc()) {
+                    throw new IOException("unchanged DEX metadata differs after export: " + name);
+                }
+            }
+        }
+    }
+
+    private boolean isUnchangedDexEntry(String name) {
+        AndroidClassBundle bundle = resource.getAndroidClassBundles().get(name);
+        return bundle != null && resource.isOriginalDex(name, bundle);
     }
 
     private Map<String, byte[]> encodeClasses() throws IOException {
         Map<String, byte[]> output = new LinkedHashMap<>();
         for (var entry : resource.getAndroidClassBundles().entrySet()) {
-            output.put(entry.getKey(), encodeDex(entry.getKey(), entry.getValue()));
+            String name = entry.getKey();
+            AndroidClassBundle bundle = entry.getValue();
+            if (resource.archive() != null
+                    && resource.archive().entries().containsKey(name)
+                    && resource.isOriginalDex(name, bundle)) {
+                continue;
+            }
+            output.put(name, encodeDex(name, bundle));
         }
         resource.getJvmClassBundle().forEach((name, info) -> output.put(
                 resource.originalJvmPaths().getOrDefault(name, name + ".class"), info.getBytecode()));

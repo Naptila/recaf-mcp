@@ -2,15 +2,12 @@ package me.naptila.recafmcp.mcp.tools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import me.naptila.recafmcp.mcp.util.Hashing;
+import me.naptila.recafmcp.mcp.util.ToolErrors;
 import software.coley.recaf.services.mapping.IntermediateMappings;
-import software.coley.recaf.services.mapping.format.MappingFileFormat;
 import software.coley.recaf.services.mapping.format.MappingFormatManager;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 
@@ -62,6 +59,13 @@ final class MappingToolSupport {
     static void addFormatMetadata(JsonObject target,
                                   Descriptor selected,
                                   List<Descriptor> descriptors) {
+        addFormatMetadata(target, selected, descriptors, true);
+    }
+
+    static void addFormatMetadata(JsonObject target,
+                                  Descriptor selected,
+                                  List<Descriptor> descriptors,
+                                  boolean includeAvailableFormats) {
         target.addProperty("format", selected.name());
         target.addProperty("format_supports_export", selected.supportsExport());
         target.addProperty(
@@ -72,6 +76,9 @@ final class MappingToolSupport {
                 "format_variable_type_differentiation",
                 selected.variableTypeDifferentiation()
         );
+        if (!includeAvailableFormats) {
+            return;
+        }
         JsonArray available = new JsonArray();
         descriptors.forEach(item -> {
             JsonObject format = new JsonObject();
@@ -110,25 +117,11 @@ final class MappingToolSupport {
     }
 
     static String sha256(String text) {
-        try {
-            return HexFormat.of().formatHex(
-                    MessageDigest.getInstance("SHA-256")
-                            .digest(text.getBytes(StandardCharsets.UTF_8))
-            );
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("SHA-256 is unavailable", ex);
-        }
+        return Hashing.sha256(text);
     }
 
     static String exceptionMessage(Throwable throwable) {
-        String message = throwable.getMessage();
-        if (message == null || message.isBlank()) {
-            return throwable.getClass().getSimpleName();
-        }
-        String singleLine = message.replace('\n', ' ').replace('\r', ' ').strip();
-        return singleLine.length() <= 500
-                ? singleLine
-                : singleLine.substring(0, 500);
+        return ToolErrors.message(throwable);
     }
 
     private static int count(Collection<? extends Collection<?>> values) {

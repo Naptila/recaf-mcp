@@ -70,11 +70,27 @@ public final class AtomicFileInstaller {
             throw new FileAlreadyExistsException(output.toString());
         }
 
-        Path temporary = Files.createTempFile(realParent, "." + fileName + ".", ".tmp");
+        java.util.Set<java.nio.file.attribute.PosixFilePermission> preservedPermissions = null;
+        if (destinationExists && !Files.isSymbolicLink(output)) {
+            try {
+                preservedPermissions = Files.getPosixFilePermissions(output, LinkOption.NOFOLLOW_LINKS);
+            } catch (UnsupportedOperationException | IOException ignored) {
+                preservedPermissions = null;
+            }
+        }
+
+        Path temporary = createUmaskRespectingTempSibling(realParent, fileName.toString());
         boolean installed = false;
         try {
             writer.write(temporary);
             int entryCount = validator.validate(temporary);
+            if (preservedPermissions != null) {
+                try {
+                    Files.setPosixFilePermissions(temporary, preservedPermissions);
+                } catch (UnsupportedOperationException | IOException ignored) {
+                    // Best-effort preservation on POSIX filesystems.
+                }
+            }
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                 channel.force(true);
             }
@@ -98,6 +114,21 @@ public final class AtomicFileInstaller {
                 Files.deleteIfExists(temporary);
             }
         }
+    }
+
+    private static Path createUmaskRespectingTempSibling(Path parent, String fileName)
+            throws IOException {
+        for (int attempt = 0; attempt < 16; attempt++) {
+            Path candidate = parent.resolve(
+                    "." + fileName + "." + java.util.UUID.randomUUID() + ".tmp"
+            );
+            try {
+                return Files.createFile(candidate);
+            } catch (FileAlreadyExistsException ignored) {
+                // Retry with a fresh random suffix.
+            }
+        }
+        return Files.createTempFile(parent, "." + fileName + ".", ".tmp");
     }
 
     private static int validateZip(Path path) throws IOException {

@@ -28,7 +28,10 @@ public final class PatchInstructionsTool implements McpTool {
             "descriptor",
             "assembly",
             "expected_assembly_sha256",
-            "dry_run", "scope", "dex_name"
+            "dry_run",
+            "allow_unverifiable",
+            "scope",
+            "dex_name"
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
 
@@ -86,6 +89,18 @@ public final class PatchInstructionsTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        JsonObject selectionError = ClassToolSupport.validateSelection(
+                workspace.getPrimaryResource(),
+                request.selection()
+        );
+        if (selectionError != null) {
+            JsonObject structured = selectionError.getAsJsonObject("structuredContent");
+            structured.addProperty("owner", request.owner());
+            structured.addProperty("name", request.name());
+            structured.addProperty("descriptor", request.descriptor());
+            structured.addProperty("applied", false);
+            return selectionError;
+        }
         if (request.selection().scope() == ClassToolSupport.Scope.ANDROID) {
             return executeAndroid(workspace, request);
         }
@@ -96,12 +111,41 @@ public final class PatchInstructionsTool implements McpTool {
                 request.descriptor()
         );
         if (target == null) {
-            return error(
+            JsonObject notFound = error(
                     "method with exact owner, name, and descriptor not found in primary JVM resource",
                     request,
                     List.of(),
                     null
             );
+            JsonObject structured = notFound.getAsJsonObject("structuredContent");
+            ClassToolSupport.addMutationScopeDiagnostics(
+                    structured,
+                    workspace.getPrimaryResource(),
+                    request.selection(),
+                    request.owner()
+            );
+            var ownerMatches = ClassToolSupport.exact(
+                    workspace.getPrimaryResource(),
+                    request.selection(),
+                    request.owner()
+            );
+            if (ownerMatches.isEmpty()) {
+                ClassToolSupport.addDidYouMeanClasses(
+                        structured,
+                        workspace.getPrimaryResource(),
+                        request.selection(),
+                        request.owner()
+                );
+            } else {
+                ClassToolSupport.addDidYouMeanMembers(
+                        structured,
+                        ownerMatches.getFirst().classInfo(),
+                        request.name(),
+                        request.descriptor(),
+                        true
+                );
+            }
+            return notFound;
         }
 
         List<MethodAssemblySupport.Diagnostic> diagnostics = new ArrayList<>();
@@ -139,6 +183,35 @@ public final class PatchInstructionsTool implements McpTool {
             );
         }
 
+        String submittedAssemblyHash = MethodAssemblySupport.sha256(request.assembly());
+        String originalClassHash = MethodAssemblySupport.sha256(
+                target.classInfo().getBytecode()
+        );
+        if (submittedAssemblyHash.equals(currentAssemblyHash)) {
+            JsonObject structured = metadata(request);
+            structured.addProperty("owner", target.classInfo().getName());
+            structured.addProperty("name", target.method().getName());
+            structured.addProperty("descriptor", target.method().getDescriptor());
+            structured.addProperty("applied", false);
+            structured.addProperty("changed", false);
+            structured.addProperty("verification_passed", true);
+            structured.addProperty("previous_assembly_sha256", currentAssemblyHash);
+            structured.addProperty("current_assembly_sha256", currentAssemblyHash);
+            structured.addProperty("assembly_sha256", currentAssemblyHash);
+            structured.addProperty("submitted_assembly_sha256", submittedAssemblyHash);
+            structured.addProperty("original_class_sha256", originalClassHash);
+            structured.addProperty("patched_class_sha256", originalClassHash);
+            structured.addProperty("classfile_version", target.classInfo().getVersion());
+            structured.addProperty("assembly_format", "recaf_jasm_method");
+            structured.addProperty("scope", "primary_jvm");
+            MappingMutationSupport.addPersistenceMetadata(structured, workspace, false);
+            MethodAssemblySupport.addDiagnostics(structured, diagnostics);
+            String message = request.dryRun()
+                    ? "submitted assembly is identical to current method; dry-run made no workspace changes"
+                    : "submitted assembly is identical to current method; no workspace changes made";
+            return McpTool.successResult(message, structured);
+        }
+
         MethodAssemblySupport.OperationResult<JvmClassInfo> assemblyResult;
         try {
             ToolCancellation.check();
@@ -173,13 +246,31 @@ public final class PatchInstructionsTool implements McpTool {
             );
         }
 
-        String originalClassHash = MethodAssemblySupport.sha256(
-                target.classInfo().getBytecode()
-        );
+        MethodAssemblySupport.VerificationOutcome verification =
+                MethodAssemblySupport.verifyMethodBytecode(
+                        replacement,
+                        target.method().getName(),
+                        target.method().getDescriptor(),
+                        assemblyResult.diagnostics(),
+                        request.allowUnverifiable()
+                );
+        diagnostics.addAll(verification.diagnostics());
+        if (!verification.passed() && !request.allowUnverifiable()) {
+            JsonObject rejected = error(
+                    "assembled method failed JVM bytecode verification; fix the instructions or "
+                            + "set allow_unverifiable=true to bypass verification",
+                    request,
+                    diagnostics,
+                    currentAssemblyHash
+            );
+            rejected.getAsJsonObject("structuredContent").addProperty("verification_passed", false);
+            return rejected;
+        }
+
         String patchedClassHash = MethodAssemblySupport.sha256(replacement.getBytecode());
         boolean changed = !originalClassHash.equals(patchedClassHash);
         ToolCancellation.check();
-        JvmClassInfo latest = target.bundle().get(request.owner());
+        JvmClassInfo latest = target.bundle().get(target.classInfo().getName());
         if (latest == null || !originalClassHash.equals(
                 MethodAssemblySupport.sha256(latest.getBytecode()))) {
             return error(
@@ -192,34 +283,54 @@ public final class PatchInstructionsTool implements McpTool {
         }
 
         boolean applied = false;
+        String resultingAssemblyHash = currentAssemblyHash;
+        String previewAssemblyHash = changed
+                ? postPatchJvmAssemblyHash(workspace, target, replacement, request)
+                : currentAssemblyHash;
         if (!request.dryRun() && changed) {
             target.bundle().put(replacement);
             applied = true;
+            resultingAssemblyHash = previewAssemblyHash;
         }
 
         JsonObject structured = metadata(request);
+        structured.addProperty("owner", target.classInfo().getName());
+        structured.addProperty("name", target.method().getName());
+        structured.addProperty("descriptor", target.method().getDescriptor());
         structured.addProperty("applied", applied);
         structured.addProperty("changed", changed);
-        structured.addProperty("current_assembly_sha256", currentAssemblyHash);
+        structured.addProperty("verification_passed", verification.passed());
+        structured.addProperty("previous_assembly_sha256", currentAssemblyHash);
+        structured.addProperty("current_assembly_sha256", resultingAssemblyHash);
+        structured.addProperty("preview_assembly_sha256", previewAssemblyHash);
+        structured.addProperty("assembly_sha256", resultingAssemblyHash);
         structured.addProperty(
                 "submitted_assembly_sha256",
-                MethodAssemblySupport.sha256(request.assembly())
+                submittedAssemblyHash
         );
         structured.addProperty("original_class_sha256", originalClassHash);
         structured.addProperty("patched_class_sha256", patchedClassHash);
         structured.addProperty("classfile_version", replacement.getVersion());
         structured.addProperty("assembly_format", "recaf_jasm_method");
         structured.addProperty("scope", "primary_jvm");
+        MappingMutationSupport.addPersistenceMetadata(structured, workspace, applied);
         MethodAssemblySupport.addDiagnostics(structured, diagnostics);
         String message;
         if (request.dryRun()) {
-            message = changed
-                    ? "method assembly validated; dry-run made no workspace changes"
-                    : "method assembly validated as a no-op; dry-run made no workspace changes";
+            if (!verification.passed()) {
+                message = "method assembly assembled with verification warnings "
+                        + "(allow_unverifiable=true); dry-run made no workspace changes";
+            } else {
+                message = changed
+                        ? "method assembly assembled and verified; dry-run made no workspace changes"
+                        : "method assembly assembled and verified as a no-op; dry-run made no workspace changes";
+            }
         } else if (applied) {
-            message = "assembled and replaced one JVM method";
+            message = verification.passed()
+                    ? "assembled, verified, and replaced one JVM method"
+                    : "assembled and replaced one JVM method (allow_unverifiable=true)";
         } else {
-            message = "method assembly validated as a no-op";
+            message = "method assembly assembled and verified as a no-op";
         }
         return McpTool.successResult(message, structured);
     }
@@ -234,35 +345,71 @@ public final class PatchInstructionsTool implements McpTool {
             if (matches.size() != 1) {
                 JsonObject result = error(matches.isEmpty() ? "Android owner not found"
                         : "Android owner is ambiguous; specify dex_name", request, diagnostics, null);
-                result.getAsJsonObject("structuredContent").add("candidates", ClassToolSupport.candidates(matches));
+                JsonObject structured = result.getAsJsonObject("structuredContent");
+                structured.add("candidates", ClassToolSupport.candidates(matches));
+                if (matches.isEmpty()) {
+                    ClassToolSupport.addMutationScopeDiagnostics(
+                            structured,
+                            workspace.getPrimaryResource(),
+                            request.selection(),
+                            request.owner()
+                    );
+                    ClassToolSupport.addDidYouMeanClasses(
+                            structured,
+                            workspace.getPrimaryResource(),
+                            request.selection(),
+                            request.owner()
+                    );
+                }
                 return result;
             }
             var entry = matches.getFirst();
             var original = entry.classInfo().asAndroidClass();
-            if (original.getDeclaredMethod(request.name(), request.descriptor()) == null) {
-                return error("method not found in Android owner", request, diagnostics, null);
+            var resolvedMethod = ClassToolSupport.findDeclaredMethod(
+                    original,
+                    request.name(),
+                    request.descriptor()
+            );
+            if (resolvedMethod == null) {
+                JsonObject notFound = error(
+                        "method not found in Android owner",
+                        request,
+                        diagnostics,
+                        null
+                );
+                ClassToolSupport.addDidYouMeanMembers(
+                        notFound.getAsJsonObject("structuredContent"),
+                        original,
+                        request.name(),
+                        request.descriptor(),
+                        true
+                );
+                return notFound;
             }
+            String methodName = resolvedMethod.getName();
+            String methodDesc = resolvedMethod.getDescriptor();
             if (androidPipelineManager == null) {
                 return error("Dalvik assembler is unavailable", request, diagnostics, null);
             }
             var bundle = workspace.getPrimaryResource().getAndroidClassBundles().get(entry.dexName());
             int version = bundle.getVersion();
-            String assembly = AndroidAssemblySupport.disassemble(original, request.name(), request.descriptor());
+            String assembly = AndroidAssemblySupport.disassemble(original, methodName, methodDesc);
             currentHash = MethodAssemblySupport.sha256(assembly);
             if (!currentHash.equals(request.expectedAssemblySha256())) {
                 return error("method assembly changed; read it again with get_method_assembly",
                         request, diagnostics, currentHash);
             }
+            String submittedHash = MethodAssemblySupport.sha256(request.assembly());
             String originalHash = MethodAssemblySupport.sha256(AndroidAssemblySupport.bytes(original, version));
             var result = AndroidAssemblySupport.assemble(androidPipelineManager, workspace, entry,
-                    request.name(), request.descriptor(), request.assembly());
+                    methodName, methodDesc, request.assembly());
             diagnostics.addAll(result.diagnostics());
             if (!result.success()) {
                 return error("Recaf rejected the submitted Dalvik assembly", request, diagnostics, currentHash);
             }
             var replacement = result.value();
             String invalid = AndroidAssemblySupport.validateReplacement(original, replacement,
-                    request.name(), request.descriptor(), version);
+                    methodName, methodDesc, version);
             if (invalid != null) {
                 return error(invalid, request, diagnostics, currentHash);
             }
@@ -275,19 +422,32 @@ public final class PatchInstructionsTool implements McpTool {
                 return error("owner class changed while preparing the patch; read get_method_assembly again",
                         request, diagnostics, currentHash);
             }
+            String previewHash = changed
+                    ? MethodAssemblySupport.sha256(
+                            AndroidAssemblySupport.disassemble(replacement, methodName, methodDesc)
+                    )
+                    : currentHash;
             boolean applied = changed && !request.dryRun();
+            String resultingHash = applied ? previewHash : currentHash;
             if (applied) {
                 bundle.put(replacement);
             }
             JsonObject structured = metadata(request);
+            structured.addProperty("owner", entry.className());
+            structured.addProperty("name", methodName);
+            structured.addProperty("descriptor", methodDesc);
             ClassToolSupport.addIdentity(structured, entry);
             structured.addProperty("scope", "primary_android");
             structured.addProperty("assembly_format", "recaf_jasm_dalvik_method");
             structured.addProperty("dex_version", version);
             structured.addProperty("applied", applied);
             structured.addProperty("changed", changed);
-            structured.addProperty("current_assembly_sha256", currentHash);
-            structured.addProperty("submitted_assembly_sha256", MethodAssemblySupport.sha256(request.assembly()));
+            structured.addProperty("verification_passed", true);
+            structured.addProperty("previous_assembly_sha256", currentHash);
+            structured.addProperty("current_assembly_sha256", resultingHash);
+            structured.addProperty("preview_assembly_sha256", previewHash);
+            structured.addProperty("assembly_sha256", resultingHash);
+            structured.addProperty("submitted_assembly_sha256", submittedHash);
             structured.addProperty("original_class_sha256", originalHash);
             structured.addProperty("patched_class_sha256", patchedHash);
             MappingMutationSupport.addPersistenceMetadata(structured, workspace, applied);
@@ -299,6 +459,42 @@ public final class PatchInstructionsTool implements McpTool {
             return error("Dalvik patch failed: " + MethodAssemblySupport.exceptionMessage(ex),
                     request, diagnostics, currentHash);
         }
+    }
+
+    private String postPatchJvmAssemblyHash(Workspace workspace,
+                                            MethodAssemblySupport.Target beforeTarget,
+                                            JvmClassInfo replacement,
+                                            Request request) {
+        var updatedMethod = ClassToolSupport.findDeclaredMethod(
+                replacement,
+                request.name(),
+                request.descriptor()
+        );
+        if (updatedMethod == null) {
+            return MethodAssemblySupport.sha256(request.assembly());
+        }
+        try {
+            var updatedPath = software.coley.recaf.path.PathNodes.memberPath(
+                    workspace,
+                    workspace.getPrimaryResource(),
+                    beforeTarget.bundle(),
+                    replacement,
+                    updatedMethod
+            );
+            var updatedTarget = new MethodAssemblySupport.Target(
+                    beforeTarget.bundle(),
+                    replacement,
+                    updatedMethod,
+                    updatedPath
+            );
+            var postDisassembly = assembler.disassemble(workspace, updatedTarget);
+            if (postDisassembly.success() && postDisassembly.value() != null) {
+                return MethodAssemblySupport.sha256(postDisassembly.value());
+            }
+        } catch (Exception ex) {
+            ToolCancellation.propagateIfRequested(ex);
+        }
+        return MethodAssemblySupport.sha256(request.assembly());
     }
 
     private static JsonObject error(
@@ -323,6 +519,7 @@ public final class PatchInstructionsTool implements McpTool {
         structured.addProperty("descriptor", request.descriptor());
         structured.addProperty("expected_assembly_sha256", request.expectedAssemblySha256());
         structured.addProperty("dry_run", request.dryRun());
+        structured.addProperty("allow_unverifiable", request.allowUnverifiable());
         structured.addProperty("requested_scope", request.selection().scope().value());
         structured.addProperty("dex_name", request.selection().dexName());
         return structured;
@@ -339,6 +536,7 @@ public final class PatchInstructionsTool implements McpTool {
                 "expected_assembly_sha256"
         );
         boolean dryRun = ToolArguments.bool(arguments, "dry_run", false);
+        boolean allowUnverifiable = ToolArguments.bool(arguments, "allow_unverifiable", false);
         if (owner.length() > 1_000) {
             throw new IllegalArgumentException("owner is too long");
         }
@@ -357,7 +555,7 @@ public final class PatchInstructionsTool implements McpTool {
             );
         }
         return new Request(owner, name, descriptor, assembly, expectedHash, dryRun,
-                ClassToolSupport.parseSelection(arguments, false));
+                allowUnverifiable, ClassToolSupport.parseSelection(arguments, false));
     }
 
     private static boolean isLowercaseSha256(String value) {
@@ -405,9 +603,17 @@ public final class PatchInstructionsTool implements McpTool {
         dryRun.addProperty("default", false);
         dryRun.addProperty(
                 "description",
-                "Assemble and validate without mutation."
+                "Assemble and verify without mutation."
         );
         properties.add("dry_run", dryRun);
+        JsonObject allowUnverifiable = new JsonObject();
+        allowUnverifiable.addProperty("type", "boolean");
+        allowUnverifiable.addProperty("default", false);
+        allowUnverifiable.addProperty(
+                "description",
+                "Bypass JVM bytecode verification failures (for intentional anti-debug/obfuscation research)."
+        );
+        properties.add("allow_unverifiable", allowUnverifiable);
 
         JsonArray required = new JsonArray();
         required.add("owner");
@@ -443,6 +649,7 @@ public final class PatchInstructionsTool implements McpTool {
                    String assembly,
                    String expectedAssemblySha256,
                    boolean dryRun,
+                   boolean allowUnverifiable,
                    ClassToolSupport.Selection selection) {
     }
 }

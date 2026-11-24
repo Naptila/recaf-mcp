@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
+import me.naptila.recafmcp.mcp.util.ToolErrors;
 import software.coley.recaf.info.ClassInfo;
 import software.coley.recaf.services.deobfuscation.transform.generic.DeadCodeRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.DuplicateAnnotationRemovingTransformer;
@@ -16,6 +17,7 @@ import software.coley.recaf.services.deobfuscation.transform.generic.IllegalAnno
 import software.coley.recaf.services.deobfuscation.transform.generic.IllegalSignatureRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.IllegalVarargsRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.RedundantTryCatchRemovingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.generic.SyntheticModifierRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.UnknownAttributeRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.CallResultInliningTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.DuplicateCatchMergingTransformer;
@@ -401,6 +403,7 @@ public final class TransformWorkspaceTool implements McpTool {
         allowed.put("illegal_annotations", IllegalAnnotationRemovingTransformer.class);
         allowed.put("illegal_signatures", IllegalSignatureRemovingTransformer.class);
         allowed.put("illegal_varargs", IllegalVarargsRemovingTransformer.class);
+        allowed.put("synthetic_removal", SyntheticModifierRemovingTransformer.class);
         allowed.put("unknown_attributes", UnknownAttributeRemovingTransformer.class);
         allowed.put("frame_removal", FrameRemovingTransformer.class);
         allowed.put("dead_code", DeadCodeRemovingTransformer.class);
@@ -471,14 +474,11 @@ public final class TransformWorkspaceTool implements McpTool {
     }
 
     private static String exceptionMessage(Throwable throwable) {
-        String message = throwable.getMessage();
-        return message == null || message.isBlank()
-                ? throwable.getClass().getSimpleName()
-                : bounded(message, MAX_ERROR_LENGTH);
+        return ToolErrors.message(throwable, MAX_ERROR_LENGTH);
     }
 
     private static String bounded(String value, int maximum) {
-        return value.length() <= maximum ? value : value.substring(0, maximum);
+        return ToolErrors.bounded(value, maximum);
     }
 
     record TransformRequest(List<String> transformers,

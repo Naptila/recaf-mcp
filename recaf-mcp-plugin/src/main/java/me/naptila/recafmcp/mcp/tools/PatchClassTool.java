@@ -47,19 +47,22 @@ public final class PatchClassTool implements McpTool {
     private static final Set<String> ARGUMENTS = Set.of(
             "class_name",
             "source",
-            "target_version_policy"
+            "target_version_policy",
+            "classpath",
+            "include_embedded_classpath",
+            "dry_run"
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
 
     private final BooleanSupplier hasWorkspace;
     private final Supplier<Workspace> workspaceSupplier;
-    private final CompileOperation compileOperation;
+    private final ExtendedCompileOperation compileOperation;
 
     public PatchClassTool(WorkspaceManager workspaceManager, JavacCompiler compiler) {
         this(
                 workspaceManager::hasCurrentWorkspace,
                 workspaceManager::getCurrent,
-                (workspace, classInfo, source, targetVersion) -> {
+                (workspace, classInfo, source, targetVersion, classpath, includeEmbedded) -> {
                     if (!JavacCompiler.isAvailable()) {
                         return new Compilation(
                                 false,
@@ -68,15 +71,27 @@ public final class PatchClassTool implements McpTool {
                                 "the current Java runtime has no javac compiler"
                         );
                     }
-                    JavacArguments arguments = new JavacArgumentsBuilder()
+                    JavacArgumentsBuilder builder = new JavacArgumentsBuilder()
                             .withClassName(classInfo.getName())
                             .withClassSource(source)
                             .withVersionTarget(targetVersion)
                             .withDebugVariables(true)
                             .withDebugLineNumbers(true)
-                            .withDebugSourceName(true)
-                            .build();
-                    CompilerResult result = compiler.compile(arguments, workspace, null);
+                            .withDebugSourceName(true);
+                    if (!classpath.isEmpty()) {
+                        builder.withClassPath(String.join(java.io.File.pathSeparator, classpath));
+                    }
+                    JavacArguments arguments = builder.build();
+                    List<software.coley.recaf.workspace.model.resource.WorkspaceResource> virtualClasspath =
+                            includeEmbedded
+                                    ? ClassToolSupport.embeddedResources(workspace.getPrimaryResource())
+                                            .stream()
+                                            .map(ClassToolSupport.ScopedResource::resource)
+                                            .toList()
+                                    : List.of();
+                    CompilerResult result = virtualClasspath.isEmpty()
+                            ? compiler.compile(arguments, workspace, null)
+                            : compiler.compile(arguments, workspace, virtualClasspath, null);
                     List<Diagnostic> diagnostics = result.getDiagnostics().stream()
                             .map(PatchClassTool::diagnostic)
                             .toList();
@@ -98,6 +113,19 @@ public final class PatchClassTool implements McpTool {
     PatchClassTool(BooleanSupplier hasWorkspace,
                    Supplier<Workspace> workspaceSupplier,
                    CompileOperation compileOperation) {
+        this(
+                hasWorkspace,
+                workspaceSupplier,
+                (workspace, classInfo, source, targetVersion, classpath, includeEmbedded) -> {
+                    Objects.requireNonNull(compileOperation, "compileOperation");
+                    return compileOperation.compile(workspace, classInfo, source, targetVersion);
+                }
+        );
+    }
+
+    PatchClassTool(BooleanSupplier hasWorkspace,
+                   Supplier<Workspace> workspaceSupplier,
+                   ExtendedCompileOperation compileOperation) {
         this.hasWorkspace = Objects.requireNonNull(hasWorkspace, "hasWorkspace");
         this.workspaceSupplier = Objects.requireNonNull(workspaceSupplier, "workspaceSupplier");
         this.compileOperation = Objects.requireNonNull(compileOperation, "compileOperation");
@@ -131,6 +159,13 @@ public final class PatchClassTool implements McpTool {
                     "target_version_policy must be preserve or minimum_supported"
             );
         }
+        boolean dryRun = ToolArguments.bool(arguments, "dry_run", false);
+        boolean includeEmbeddedClasspath = ToolArguments.bool(
+                arguments,
+                "include_embedded_classpath",
+                true
+        );
+        List<String> classpath = parseClasspath(arguments);
         if (!isValidInternalClassName(className)) {
             throw new IllegalArgumentException("class_name must be a valid JVM internal name");
         }
@@ -144,8 +179,39 @@ public final class PatchClassTool implements McpTool {
         Workspace workspace = workspaceSupplier.get();
         JvmClassBundle bundle = workspace.getPrimaryResource().getJvmClassBundle();
         JvmClassInfo existing = bundle.get(className);
+        if (existing == null && className.contains("\\u")) {
+            String unescaped = ClassToolSupport.normalizeUnicodeInput(className);
+            existing = bundle.get(unescaped);
+            if (existing != null) {
+                className = unescaped;
+            }
+        }
         if (existing == null) {
-            return errorWithoutVersion("class not found in primary JVM resource", className);
+            JsonObject notFound = errorWithoutVersion(
+                    "class not found in primary JVM resource",
+                    className
+            );
+            JsonObject structured = notFound.getAsJsonObject("structuredContent");
+            ClassToolSupport.Selection jvmSel = new ClassToolSupport.Selection(
+                    ClassToolSupport.Scope.JVM,
+                    null,
+                    false,
+                    null,
+                    false
+            );
+            ClassToolSupport.addMutationScopeDiagnostics(
+                    structured,
+                    workspace.getPrimaryResource(),
+                    jvmSel,
+                    className
+            );
+            ClassToolSupport.addDidYouMeanClasses(
+                    structured,
+                    workspace.getPrimaryResource(),
+                    jvmSel,
+                    className
+            );
+            return notFound;
         }
         int inputClassfileVersion = existing.getVersion();
         int inputTargetVersion = inputClassfileVersion - 44;
@@ -197,7 +263,9 @@ public final class PatchClassTool implements McpTool {
                     workspace,
                     existing,
                     source,
-                    targetVersion
+                    targetVersion,
+                    classpath,
+                    includeEmbeddedClasspath
             );
         } catch (Exception ex) {
             ToolCancellation.propagateIfRequested(ex);
@@ -212,7 +280,12 @@ public final class PatchClassTool implements McpTool {
             String message = compilation.error() == null
                     ? "Java compilation failed"
                     : "Java compilation failed: " + compilation.error();
-            return error(message, className, versionPlan, compilation);
+            JsonObject failResult = error(message, className, versionPlan, compilation);
+            String hint = inferCompilationHint(compilation.diagnostics(), classpath);
+            if (hint != null) {
+                failResult.getAsJsonObject("structuredContent").addProperty("compilation_hint", hint);
+            }
+            return failResult;
         }
 
         Map<String, byte[]> outputs = compilation.outputs();
@@ -269,13 +342,19 @@ public final class PatchClassTool implements McpTool {
         }
 
         String originalHash = sha256(existing.getBytecode());
+        String patchedHash = sha256(outputs.get(className));
         ToolCancellation.check();
-        for (JvmClassInfo replacement : replacements) {
-            bundle.put(replacement);
+        boolean applied = !dryRun;
+        if (applied) {
+            for (JvmClassInfo replacement : replacements) {
+                bundle.put(replacement);
+            }
+            patchedHash = sha256(bundle.get(className).getBytecode());
         }
-        JvmClassInfo patched = bundle.get(className);
 
         JsonObject structured = metadata(className, versionPlan, compilation);
+        structured.addProperty("dry_run", dryRun);
+        structured.addProperty("applied", applied);
         JsonArray updated = new JsonArray();
         replacements.stream().map(JvmClassInfo::getName).sorted().forEach(updated::add);
         structured.add("updated_classes", updated);
@@ -283,10 +362,14 @@ public final class PatchClassTool implements McpTool {
         structured.addProperty("generated_companion_count", replacements.size() - 1);
         structured.addProperty("compiled_size_bytes", compiledBytes);
         structured.addProperty("original_sha256", originalHash);
-        structured.addProperty("patched_sha256", sha256(patched.getBytecode()));
+        structured.addProperty("patched_sha256", patchedHash);
         structured.addProperty("scope", "primary_jvm");
+        MappingMutationSupport.addPersistenceMetadata(structured, workspace, applied);
         return McpTool.successResult(
-                "compiled and replaced " + replacements.size() + " JVM classes",
+                dryRun
+                        ? "compiled and validated " + replacements.size()
+                                + " JVM classes without mutating the workspace (dry_run)"
+                        : "compiled and replaced " + replacements.size() + " JVM classes",
                 structured
         );
     }
@@ -442,6 +525,33 @@ public final class PatchClassTool implements McpTool {
         properties.add("class_name", className);
         properties.add("source", source);
         properties.add("target_version_policy", versionPolicy);
+        JsonObject classpathProp = new JsonObject();
+        classpathProp.addProperty("type", "array");
+        JsonObject cpItem = new JsonObject();
+        cpItem.addProperty("type", "string");
+        cpItem.addProperty("minLength", 1);
+        classpathProp.add("items", cpItem);
+        classpathProp.addProperty(
+                "description",
+                "Optional absolute paths to external JAR/ZIP files or class directories for javac type resolution."
+        );
+        properties.add("classpath", classpathProp);
+        JsonObject includeEmbedded = new JsonObject();
+        includeEmbedded.addProperty("type", "boolean");
+        includeEmbedded.addProperty("default", true);
+        includeEmbedded.addProperty(
+                "description",
+                "Include embedded JAR resources from the workspace on javac's virtual classpath."
+        );
+        properties.add("include_embedded_classpath", includeEmbedded);
+        JsonObject dryRun = new JsonObject();
+        dryRun.addProperty("type", "boolean");
+        dryRun.addProperty("default", false);
+        dryRun.addProperty(
+                "description",
+                "Compile and validate bytecode without replacing classes in the workspace."
+        );
+        properties.add("dry_run", dryRun);
         JsonArray required = new JsonArray();
         required.add("class_name");
         required.add("source");
@@ -451,6 +561,78 @@ public final class PatchClassTool implements McpTool {
         schema.add("required", required);
         schema.addProperty("additionalProperties", false);
         return schema;
+    }
+
+    private static List<String> parseClasspath(JsonObject arguments) {
+        if (!arguments.has("classpath") || arguments.get("classpath").isJsonNull()) {
+            return List.of();
+        }
+        var elem = arguments.get("classpath");
+        if (!elem.isJsonArray()) {
+            throw new IllegalArgumentException("classpath must be an array of absolute paths");
+        }
+        JsonArray arr = elem.getAsJsonArray();
+        if (arr.size() > 64) {
+            throw new IllegalArgumentException("classpath exceeds maximum of 64 entries");
+        }
+        List<String> resolved = new ArrayList<>(arr.size());
+        for (int i = 0; i < arr.size(); i++) {
+            var item = arr.get(i);
+            if (item == null || !item.isJsonPrimitive() || !item.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException("classpath[" + i + "] must be a non-empty string");
+            }
+            String raw = item.getAsString().strip();
+            if (raw.isEmpty()) {
+                throw new IllegalArgumentException("classpath[" + i + "] must not be blank");
+            }
+            java.nio.file.Path path;
+            try {
+                path = java.nio.file.Path.of(raw);
+            } catch (RuntimeException ex) {
+                throw new IllegalArgumentException("classpath[" + i + "] is not a valid path", ex);
+            }
+            if (!path.isAbsolute()) {
+                throw new IllegalArgumentException("classpath[" + i + "] must be an absolute path");
+            }
+            if (!java.nio.file.Files.exists(path) || !java.nio.file.Files.isReadable(path)) {
+                throw new IllegalArgumentException("classpath[" + i + "] does not exist or is not readable: " + raw);
+            }
+            resolved.add(path.toString());
+        }
+        return List.copyOf(resolved);
+    }
+
+    private static String inferCompilationHint(List<Diagnostic> diagnostics,
+                                               List<String> classpath) {
+        if (diagnostics == null || diagnostics.isEmpty()) {
+            return null;
+        }
+        boolean rawPhantomSymptom = false;
+        boolean missingSymbol = false;
+        for (Diagnostic d : diagnostics) {
+            String msg = d.message();
+            if (msg == null) {
+                continue;
+            }
+            if (msg.contains("of type java.lang.Object")
+                    || msg.contains("java.lang.Throwable; must be caught")
+                    || msg.contains("incompatible types: java.lang.Object cannot be converted")) {
+                rawPhantomSymptom = true;
+            }
+            if (msg.contains("cannot find symbol") || msg.contains("does not exist")) {
+                missingSymbol = true;
+            }
+        }
+        if (rawPhantomSymptom) {
+            return "External library types not on the workspace classpath are synthesized as raw phantoms, "
+                    + "which can erase generic return types to Object/Throwable. Pass classpath=[\"/abs/path/to/lib.jar\"] "
+                    + "or add explicit generic casts (or use patch_instructions for surgical method edits).";
+        }
+        if (missingSymbol && classpath.isEmpty()) {
+            return "Referenced external types may be missing from the workspace; pass classpath=[\"/abs/path/to/lib.jar\"] "
+                    + "to supply external library JARs, or use patch_instructions for bytecode-level edits.";
+        }
+        return null;
     }
 
     record Diagnostic(String level, int line, int column, int length, String message) {
@@ -480,5 +662,15 @@ public final class PatchClassTool implements McpTool {
                             JvmClassInfo classInfo,
                             String source,
                             int targetVersion) throws Exception;
+    }
+
+    @FunctionalInterface
+    interface ExtendedCompileOperation {
+        Compilation compile(Workspace workspace,
+                            JvmClassInfo classInfo,
+                            String source,
+                            int targetVersion,
+                            List<String> classpath,
+                            boolean includeEmbeddedClasspath) throws Exception;
     }
 }

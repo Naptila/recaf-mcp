@@ -1,7 +1,5 @@
 package me.naptila.recafmcp.mcp.tools;
 
-import me.naptila.recafmcp.mcp.android.AndroidJvmConverter;
-
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
@@ -9,8 +7,10 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.internal.AtomicFileInstaller;
+import me.naptila.recafmcp.mcp.util.Hashing;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
+import me.naptila.recafmcp.mcp.util.ToolErrors;
 import software.coley.recaf.info.JvmClassInfo;
 import software.coley.recaf.info.properties.builtin.InputFilePathProperty;
 import software.coley.recaf.services.decompile.DecompileResult;
@@ -28,7 +28,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -39,7 +38,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -61,14 +59,19 @@ public final class ExportDecompiledSourcesTool implements McpTool {
     private static final int MAX_FILTER_LENGTH = 500;
     private static final int MAX_IN_FLIGHT_DECOMPILATIONS = 8;
     private static final int MAX_REPORTED_FAILURES = 100;
+    private static final int DEFAULT_PER_CLASS_TIMEOUT_SEC = 10;
     private static final Set<String> ARGUMENTS = Set.of(
             "output_path",
             "overwrite",
             "filter",
             "regex",
             "decompiler",
+            "include_inner_classes",
             "scope",
-            "dex_name"
+            "dex_name",
+            "resource",
+            "include_embedded",
+            DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT
     );
 
     private final BooleanSupplier hasWorkspace;
@@ -91,11 +94,14 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                     if (decompiler == null) {
                         return null;
                     }
+                    boolean allowVineflowerFallback = requestedName == null;
                     return new SelectedDecompiler(
                             decompiler.getName(),
                             decompiler.getVersion(),
-                            (workspace, classInfo) -> decompilerManager.decompile(
+                            (workspace, classInfo) -> DecompilerToolSupport.decompile(
+                                    decompilerManager,
                                     decompiler,
+                                    allowVineflowerFallback,
                                     workspace,
                                     classInfo
                             )
@@ -181,12 +187,21 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             SearchToolSupport.validateRegex(filter, "filter");
         }
         Predicate<String> classMatcher = SearchToolSupport.matcher(filter, regex);
-        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true);
+        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true, true);
         String requestedDecompiler = ToolArguments.optionalString(arguments, "decompiler");
+        boolean includeInnerClasses = ToolArguments.bool(arguments, "include_inner_classes", false);
+        int perClassTimeoutSec = ToolArguments.integer(
+                arguments,
+                DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
+                DEFAULT_PER_CLASS_TIMEOUT_SEC,
+                1,
+                DecompilerToolSupport.MAX_PER_CLASS_TIMEOUT_SEC
+        );
 
         if (!hasWorkspace.getAsBoolean()) {
             return error(
                     "workspace not open",
+                    null,
                     requestedOutput,
                     filter,
                     regex,
@@ -213,9 +228,17 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        JsonObject selectionError = ClassToolSupport.validateSelection(
+                workspace.getPrimaryResource(),
+                selection
+        );
+        if (selectionError != null) {
+            return selectionError;
+        }
         if (!(workspace.getPrimaryResource() instanceof WorkspaceFileResource fileResource)) {
             return error(
                     "workspace primary resource is not file-backed",
+                    workspace,
                     requestedOutput,
                     filter,
                     regex,
@@ -227,6 +250,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         if (inputPath == null) {
             return error(
                     "workspace primary resource has no input path",
+                    workspace,
                     requestedOutput,
                     filter,
                     regex,
@@ -244,6 +268,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         if (classes.isEmpty()) {
             return error(
                     "no classes matched the requested export scope and filter",
+                    workspace,
                     requestedOutput,
                     filter,
                     regex,
@@ -268,10 +293,12 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                                 temporary,
                                 workspace,
                                 classes,
+                                includeInnerClasses,
                                 selection,
                                 filter,
                                 regex,
-                                decompiler
+                                decompiler,
+                                perClassTimeoutSec
                         ))
                 );
             } finally {
@@ -282,6 +309,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         } catch (FileAlreadyExistsException ex) {
             return error(
                     "destination already exists; set overwrite=true to replace it",
+                    workspace,
                     requestedOutput,
                     filter,
                     regex,
@@ -292,6 +320,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             ToolCancellation.propagateIfRequested(ex);
             return error(
                     "source export failed: " + exceptionMessage(ex),
+                    workspace,
                     requestedOutput,
                     filter,
                     regex,
@@ -313,10 +342,11 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         structured.addProperty("manifest_path", MANIFEST_PATH);
         structured.addProperty(
                 "scope",
-                ClassToolSupport.outputScope(selection.scope(), true)
+                ClassToolSupport.outputScope(selection.scope(), true, selection)
         );
         structured.addProperty("requested_scope", selection.scope().value());
         addNullable(structured, "dex_name", selection.dexName());
+        ClassToolSupport.addSelectionMetadata(structured, selection);
         structured.addProperty(
                 "android_decompilation_input",
                 selection.scope().includesAndroid()
@@ -325,15 +355,24 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         );
         structured.addProperty("decompiler", decompiler.name());
         structured.addProperty("decompiler_version", decompiler.version());
+        structured.addProperty(
+                DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
+                perClassTimeoutSec
+        );
         addNullable(structured, "filter", filter);
         structured.addProperty("regex", regex);
+        structured.addProperty("include_inner_classes", includeInnerClasses);
         structured.addProperty("overwrite", overwrite);
         structured.addProperty("classes_selected", classes.size());
+        structured.addProperty("inner_classes_inlined", summary.innerClassesInlined());
         structured.addProperty("classes_exported", summary.exportedClasses());
+        structured.addProperty("classes_fallback", summary.fallbackClasses());
         structured.addProperty("classes_failed", summary.failures().size());
+        structured.addProperty("classes_timed_out", summary.timedOutClasses());
         structured.addProperty(
                 "complete",
-                summary.exportedClasses() == classes.size()
+                summary.failures().isEmpty()
+                        && summary.exportedClasses() + summary.innerClassesInlined() == classes.size()
         );
         structured.addProperty(
                 "max_in_flight_decompilations",
@@ -343,6 +382,13 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                 "decompilation_cache_temporarily_disabled",
                 cacheTemporarilyDisabled
         );
+        if (cacheTemporarilyDisabled) {
+            structured.addProperty(
+                    "decompilation_cache_note",
+                    "Recaf's in-memory decompilation cache is bypassed during bulk ZIP export "
+                            + "to prevent retaining all exported source strings in Worker heap memory."
+            );
+        }
         structured.addProperty("decompilation_results_cached", false);
         JsonArray failures = new JsonArray();
         summary.failures().stream()
@@ -364,22 +410,30 @@ public final class ExportDecompiledSourcesTool implements McpTool {
     private static ArchiveSummary writeArchive(Path path,
                                                Workspace workspace,
                                                List<ClassToolSupport.Entry> classes,
+                                               boolean includeInnerClasses,
                                                ClassToolSupport.Selection selection,
                                                String filter,
                                                boolean regex,
-                                               SelectedDecompiler decompiler)
+                                               SelectedDecompiler decompiler,
+                                               int perClassTimeoutSec)
             throws IOException {
+        InnerClassPlan plan = planInnerClasses(classes, includeInnerClasses);
+        List<ClassToolSupport.Entry> workList = new ArrayList<>(plan.initialClasses());
         JsonArray manifestEntries = new JsonArray();
         List<Failure> failures = new ArrayList<>();
         int exportedClasses = 0;
-        Deque<PendingDecompilation> pending = new ArrayDeque<>();
-        MessageDigest archiveDigest = newSha256Digest();
-        int nextClassIndex = fillPending(
+        int fallbackClasses = 0;
+        int innerClassesInlined = 0;
+        int timedOutClasses = 0;
+        Deque<DecompilerToolSupport.PendingDecompilation> pending = new ArrayDeque<>();
+        MessageDigest archiveDigest = Hashing.newSha256();
+        int nextClassIndex = DecompilerToolSupport.fillPending(
                 pending,
-                classes,
+                workList,
                 0,
+                MAX_IN_FLIGHT_DECOMPILATIONS,
                 workspace,
-                decompiler
+                decompiler.operation()::run
         );
         try (ZipOutputStream output = new ZipOutputStream(
                 new DigestOutputStream(
@@ -391,21 +445,16 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             try {
                 while (!pending.isEmpty()) {
                     ToolCancellation.check();
-                    PendingDecompilation current = pending.removeFirst();
-                    DecompileResult result = null;
-                    String failureMessage = null;
-                    try {
-                        result = current.result().get();
-                    } catch (InterruptedException ex) {
-                        Thread.currentThread().interrupt();
-                        throw new CancellationException("tool operation was cancelled");
-                    } catch (ExecutionException ex) {
-                        ToolCancellation.propagateIfRequested(ex.getCause());
-                        failureMessage = exceptionMessage(ex.getCause());
-                    } catch (CancellationException ex) {
-                        ToolCancellation.propagateIfRequested(ex);
-                        failureMessage = exceptionMessage(ex);
+                    DecompilerToolSupport.PendingDecompilation current = pending.removeFirst();
+                    DecompilerToolSupport.AwaitOutcome outcome =
+                            DecompilerToolSupport.awaitPending(current, perClassTimeoutSec);
+                    if (outcome.timedOut()) {
+                        timedOutClasses++;
                     }
+                    DecompileResult result = outcome.result();
+                    String failureMessage = outcome.failureMessage() == null
+                            ? null
+                            : boundedFailure(outcome.failureMessage());
 
                     JsonObject manifestEntry = identity(current.entry());
                     String sourcePath = sourceEntryPath(current.entry());
@@ -421,6 +470,9 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                                 : "decompiler returned " + resultType;
                     }
 
+                    List<ClassToolSupport.Entry> deferredChildren =
+                            plan.deferredByOuter().getOrDefault(entryGroupKey(current.entry()), List.of());
+
                     if (failureMessage == null) {
                         byte[] source = result.getText().getBytes(StandardCharsets.UTF_8);
                         writeZipEntry(output, sourcePath, source);
@@ -429,31 +481,64 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                         manifestEntry.addProperty("source_chars", result.getText().length());
                         manifestEntry.addProperty("source_bytes", source.length);
                         exportedClasses++;
+                        innerClassesInlined += deferredChildren.size();
                     } else {
-                        Failure failure = new Failure(current.entry(), failureMessage);
-                        failures.add(failure);
-                        manifestEntry.addProperty("status", "failed");
-                        manifestEntry.addProperty("error", failureMessage);
-                        if (result != null) {
-                            manifestEntry.addProperty(
-                                    "result_type",
-                                    result.getType().name().toLowerCase(Locale.ROOT)
-                            );
-                        } else {
-                            manifestEntry.addProperty("result_type", "unavailable");
+                        if (!deferredChildren.isEmpty()) {
+                            workList.addAll(deferredChildren);
+                        }
+                        boolean wroteFallback = false;
+                        if (current.entry().scope() == ClassToolSupport.Scope.ANDROID) {
+                            try {
+                                String jasm = AndroidAssemblySupport.disassembleClass(
+                                        current.entry().classInfo().asAndroidClass()
+                                );
+                                String jasmPath = jasmEntryPath(current.entry());
+                                byte[] jasmBytes = jasm.getBytes(StandardCharsets.UTF_8);
+                                writeZipEntry(output, jasmPath, jasmBytes);
+                                manifestEntry.addProperty("path", jasmPath);
+                                manifestEntry.addProperty("status", "fallback");
+                                manifestEntry.addProperty("result_type", "fallback");
+                                manifestEntry.addProperty("fallback_format", "dalvik_jasm");
+                                manifestEntry.addProperty("fallback_reason", failureMessage);
+                                manifestEntry.addProperty("source_chars", jasm.length());
+                                manifestEntry.addProperty("source_bytes", jasmBytes.length);
+                                exportedClasses++;
+                                fallbackClasses++;
+                                wroteFallback = true;
+                            } catch (Exception fallbackEx) {
+                                ToolCancellation.propagateIfRequested(fallbackEx);
+                            }
+                        }
+                        if (!wroteFallback) {
+                            Failure failure = new Failure(current.entry(), failureMessage);
+                            failures.add(failure);
+                            manifestEntry.addProperty("status", outcome.timedOut() ? "timed_out" : "failed");
+                            manifestEntry.addProperty("error", failureMessage);
+                            if (result != null) {
+                                manifestEntry.addProperty(
+                                        "result_type",
+                                        result.getType().name().toLowerCase(Locale.ROOT)
+                                );
+                            } else {
+                                manifestEntry.addProperty(
+                                        "result_type",
+                                        outcome.timedOut() ? "timeout" : "unavailable"
+                                );
+                            }
                         }
                     }
                     manifestEntries.add(manifestEntry);
-                    nextClassIndex = fillPending(
+                    nextClassIndex = DecompilerToolSupport.fillPending(
                             pending,
-                            classes,
+                            workList,
                             nextClassIndex,
+                            MAX_IN_FLIGHT_DECOMPILATIONS,
                             workspace,
-                            decompiler
+                            decompiler.operation()::run
                     );
                 }
             } finally {
-                drainPending(pending);
+                DecompilerToolSupport.drainPending(pending);
             }
 
             JsonObject manifest = new JsonObject();
@@ -463,18 +548,24 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             manifest.addProperty("decompiler_version", decompiler.version());
             manifest.addProperty("requested_scope", selection.scope().value());
             addNullable(manifest, "dex_name", selection.dexName());
+            ClassToolSupport.addSelectionMetadata(manifest, selection);
             addNullable(manifest, "filter", filter);
             manifest.addProperty("regex", regex);
+            manifest.addProperty("include_inner_classes", includeInnerClasses);
             manifest.addProperty("classes_selected", classes.size());
+            manifest.addProperty("inner_classes_inlined", innerClassesInlined);
             manifest.addProperty("classes_exported", exportedClasses);
+            manifest.addProperty("classes_fallback", fallbackClasses);
             manifest.addProperty("classes_failed", failures.size());
+            manifest.addProperty("classes_timed_out", timedOutClasses);
             manifest.addProperty(
                     "complete",
-                    exportedClasses == classes.size()
+                    failures.isEmpty() && exportedClasses + innerClassesInlined == classes.size()
             );
             manifest.addProperty(
                     "layout",
-                    "jvm/<internal-name>.java and android/<dex-name>/<internal-name>.java"
+                    "jvm/<internal-name>.java, android/<dex-name>/<internal-name>.java (.jasm on fallback), "
+                            + "and embedded/<resource>/..."
             );
             manifest.add("classes", manifestEntries);
             writeZipEntry(
@@ -485,45 +576,73 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         }
         return new ArchiveSummary(
                 exportedClasses,
+                fallbackClasses,
+                innerClassesInlined,
+                timedOutClasses,
                 List.copyOf(failures),
                 HexFormat.of().formatHex(archiveDigest.digest())
         );
     }
 
-    private static int fillPending(Deque<PendingDecompilation> pending,
-                                   List<ClassToolSupport.Entry> classes,
-                                   int nextClassIndex,
-                                   Workspace workspace,
-                                   SelectedDecompiler decompiler) {
-        while (pending.size() < MAX_IN_FLIGHT_DECOMPILATIONS
-                && nextClassIndex < classes.size()) {
-            ToolCancellation.check();
-            ClassToolSupport.Entry entry = classes.get(nextClassIndex++);
-            CompletableFuture<DecompileResult> result;
-            try {
-                JvmClassInfo classInfo = entry.scope() == ClassToolSupport.Scope.ANDROID
-                        ? AndroidJvmConverter.convert(entry.classInfo().asAndroidClass())
-                        : entry.classInfo().asJvmClass();
-                result = Objects.requireNonNull(
-                        decompiler.operation().run(workspace, classInfo),
-                        "decompilation future"
-                );
-            } catch (Exception ex) {
-                result = CompletableFuture.failedFuture(ex);
-            }
-            pending.addLast(new PendingDecompilation(entry, result));
+    private static InnerClassPlan planInnerClasses(List<ClassToolSupport.Entry> classes,
+                                                   boolean includeInnerClasses) {
+        if (includeInnerClasses) {
+            return new InnerClassPlan(classes, java.util.Map.of());
         }
-        return nextClassIndex;
+        java.util.Set<EntryGroupKey> present = new java.util.HashSet<>();
+        for (ClassToolSupport.Entry entry : classes) {
+            present.add(entryGroupKey(entry));
+        }
+        List<ClassToolSupport.Entry> initial = new ArrayList<>();
+        java.util.Map<EntryGroupKey, List<ClassToolSupport.Entry>> deferred = new java.util.LinkedHashMap<>();
+        for (ClassToolSupport.Entry entry : classes) {
+            EntryGroupKey enclosing = findPresentOuterKey(entry, present);
+            if (enclosing != null) {
+                deferred.computeIfAbsent(enclosing, ignored -> new ArrayList<>()).add(entry);
+            } else {
+                initial.add(entry);
+            }
+        }
+        return new InnerClassPlan(initial, deferred);
     }
 
-    private static void drainPending(Deque<PendingDecompilation> pending) {
-        while (!pending.isEmpty()) {
-            try {
-                pending.removeFirst().result().join();
-            } catch (CancellationException | CompletionException ignored) {
-                // Draining keeps Recaf decompiler tasks inside the tool lifetime.
-            }
+    private static EntryGroupKey findPresentOuterKey(ClassToolSupport.Entry entry,
+                                                     java.util.Set<EntryGroupKey> present) {
+        String name = entry.className();
+        int firstDollar = name.indexOf('$');
+        if (firstDollar <= 0 || firstDollar == name.length() - 1) {
+            return null;
         }
+        // Prefer the outermost selected ancestor so nested A$B$C attaches to A when A is exported.
+        int idx = firstDollar;
+        while (idx > 0 && idx < name.length() - 1) {
+            String candidateOuter = name.substring(0, idx);
+            EntryGroupKey key = new EntryGroupKey(
+                    entry.scope(),
+                    entry.dexName(),
+                    entry.resourcePath(),
+                    candidateOuter
+            );
+            if (present.contains(key)) {
+                return key;
+            }
+            idx = name.indexOf('$', idx + 1);
+        }
+        return null;
+    }
+
+    private static EntryGroupKey entryGroupKey(ClassToolSupport.Entry entry) {
+        return new EntryGroupKey(
+                entry.scope(),
+                entry.dexName(),
+                entry.resourcePath(),
+                entry.className()
+        );
+    }
+
+    private static String boundedFailure(String message) {
+        String singleLine = message.replace('\n', ' ').replace('\r', ' ').strip();
+        return singleLine.length() <= 512 ? singleLine : singleLine.substring(0, 512);
     }
 
     private static void writeZipEntry(ZipOutputStream output,
@@ -537,7 +656,20 @@ public final class ExportDecompiledSourcesTool implements McpTool {
     }
 
     static String sourceEntryPath(ClassToolSupport.Entry entry) {
+        return entryPathWithExtension(entry, ".java");
+    }
+
+    static String jasmEntryPath(ClassToolSupport.Entry entry) {
+        return entryPathWithExtension(entry, ".jasm");
+    }
+
+    private static String entryPathWithExtension(ClassToolSupport.Entry entry, String extension) {
         StringBuilder path = new StringBuilder();
+        if (entry.resourcePath() != null) {
+            path.append("embedded/")
+                    .append(escapePathSegment(entry.resourcePath()))
+                    .append('/');
+        }
         if (entry.scope() == ClassToolSupport.Scope.ANDROID) {
             path.append("android/")
                     .append(escapePathSegment(entry.dexName()))
@@ -552,30 +684,37 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             }
             path.append(escapePathSegment(segments[index]));
         }
-        return path.append(".java").toString();
+        return path.append(extension).toString();
     }
 
     static String escapePathSegment(String value) {
         if (value == null || value.isEmpty()) {
             return "%00";
         }
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        StringBuilder escaped = new StringBuilder(bytes.length);
-        for (byte raw : bytes) {
-            int current = raw & 0xff;
-            boolean safe = current >= 'a' && current <= 'z'
-                    || current >= 'A' && current <= 'Z'
-                    || current >= '0' && current <= '9'
-                    || current == '-'
-                    || current == '_'
-                    || current == '$'
-                    || current == '.';
-            if (safe) {
-                escaped.append((char) current);
+        StringBuilder escaped = new StringBuilder(value.length());
+        for (int offset = 0; offset < value.length(); ) {
+            int cp = value.codePointAt(offset);
+            offset += Character.charCount(cp);
+            boolean safeAscii = (cp >= 'a' && cp <= 'z')
+                    || (cp >= 'A' && cp <= 'Z')
+                    || (cp >= '0' && cp <= '9')
+                    || cp == '-'
+                    || cp == '_'
+                    || cp == '$'
+                    || cp == '.';
+            boolean safeUnicodeIdentifier = cp > 0x7F
+                    && Character.isJavaIdentifierPart(cp)
+                    && !Character.isISOControl(cp);
+            if (safeAscii || safeUnicodeIdentifier) {
+                escaped.appendCodePoint(cp);
             } else {
-                escaped.append('%')
-                        .append(Character.toUpperCase(Character.forDigit(current >>> 4, 16)))
-                        .append(Character.toUpperCase(Character.forDigit(current & 0x0f, 16)));
+                byte[] utf8 = new String(Character.toChars(cp)).getBytes(StandardCharsets.UTF_8);
+                for (byte raw : utf8) {
+                    int current = raw & 0xff;
+                    escaped.append('%')
+                            .append(Character.toUpperCase(Character.forDigit(current >>> 4, 16)))
+                            .append(Character.toUpperCase(Character.forDigit(current & 0x0f, 16)));
+                }
             }
         }
         if (escaped.toString().equals(".") || escaped.toString().equals("..")) {
@@ -585,6 +724,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
     }
 
     private JsonObject error(String message,
+                             Workspace workspace,
                              String outputPath,
                              String filter,
                              boolean regex,
@@ -597,6 +737,13 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                 selection,
                 requestedDecompiler
         );
+        if (workspace != null) {
+            ClassToolSupport.addScopeDiagnostics(
+                    structured,
+                    workspace.getPrimaryResource(),
+                    selection
+            );
+        }
         structured.addProperty("error", message);
         return McpTool.errorResult(message, structured);
     }
@@ -610,6 +757,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         structured.addProperty("output_path", outputPath);
         structured.addProperty("requested_scope", selection.scope().value());
         addNullable(structured, "dex_name", selection.dexName());
+        ClassToolSupport.addSelectionMetadata(structured, selection);
         addNullable(structured, "filter", filter);
         structured.addProperty("regex", regex);
         addNullable(structured, "requested_decompiler", requestedDecompiler);
@@ -631,24 +779,8 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         }
     }
 
-    private static MessageDigest newSha256Digest() {
-        try {
-            return MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("SHA-256 is unavailable", ex);
-        }
-    }
-
     private static String exceptionMessage(Throwable throwable) {
-        if (throwable == null) {
-            return "unknown failure";
-        }
-        String message = throwable.getMessage();
-        if (message == null || message.isBlank()) {
-            return throwable.getClass().getSimpleName();
-        }
-        String singleLine = message.replace('\n', ' ').replace('\r', ' ').strip();
-        return singleLine.length() <= 512 ? singleLine : singleLine.substring(0, 512);
+        return ToolErrors.message(throwable, 512);
     }
 
     private static JsonObject createInputSchema(
@@ -687,11 +819,23 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                 "Use a partial Java regex for filter; requires filter."
         );
         properties.add("regex", regex);
+        JsonObject includeInnerClasses = new JsonObject();
+        includeInnerClasses.addProperty("type", "boolean");
+        includeInnerClasses.addProperty("default", false);
+        includeInnerClasses.addProperty(
+                "description",
+                "Export standalone Outer$Inner.java files even when their enclosing Outer.java is exported."
+        );
+        properties.add("include_inner_classes", includeInnerClasses);
         properties.add(
                 "decompiler",
                 DecompilerToolSupport.inputSchemaProperty(decompilers)
         );
-        ClassToolSupport.addScopeProperties(properties, true);
+        properties.add(
+                DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
+                DecompilerToolSupport.timeoutSchemaProperty(DEFAULT_PER_CLASS_TIMEOUT_SEC)
+        );
+        ClassToolSupport.addScopeProperties(properties, true, true, true);
 
         JsonArray required = new JsonArray();
         required.add("output_path");
@@ -731,13 +875,23 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         }
     }
 
-    private record PendingDecompilation(ClassToolSupport.Entry entry,
-                                        CompletableFuture<DecompileResult> result) {
-    }
-
     private record ArchiveSummary(int exportedClasses,
+                                  int fallbackClasses,
+                                  int innerClassesInlined,
+                                  int timedOutClasses,
                                   List<Failure> failures,
                                   String sha256) {
+    }
+
+    private record EntryGroupKey(ClassToolSupport.Scope scope,
+                                 String dexName,
+                                 String resourcePath,
+                                 String className) {
+    }
+
+    private record InnerClassPlan(
+            List<ClassToolSupport.Entry> initialClasses,
+            java.util.Map<EntryGroupKey, List<ClassToolSupport.Entry>> deferredByOuter) {
     }
 
     private record Failure(ClassToolSupport.Entry entry, String message) {

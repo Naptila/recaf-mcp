@@ -1,7 +1,5 @@
 package me.naptila.recafmcp.mcp.tools;
 
-import me.naptila.recafmcp.mcp.android.AndroidJvmConverter;
-
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
@@ -22,7 +20,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
@@ -37,6 +34,7 @@ public final class SearchCodeTool implements McpTool {
     private static final int MAX_FILTER_LENGTH = 500;
     private static final int MAX_IN_FLIGHT_DECOMPILATIONS = 8;
     private static final int MAX_IMPLICIT_DECOMPILATION_CLASSES = 200;
+    private static final int DEFAULT_PER_CLASS_TIMEOUT_SEC = 10;
     private static final Set<String> ARGUMENTS = Set.of(
             "text",
             "regex",
@@ -44,7 +42,10 @@ public final class SearchCodeTool implements McpTool {
             "decompiler",
             "scope",
             "dex_name",
+            "resource",
+            "include_embedded",
             "allow_large_scan",
+            DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
             "offset",
             "limit"
     );
@@ -68,11 +69,14 @@ public final class SearchCodeTool implements McpTool {
                     if (decompiler == null) {
                         return null;
                     }
+                    boolean allowVineflowerFallback = requestedName == null;
                     return new SelectedDecompiler(
                             decompiler.getName(),
                             decompiler.getVersion(),
-                            (workspace, classInfo) -> decompilerManager.decompile(
+                            (workspace, classInfo) -> DecompilerToolSupport.decompile(
+                                    decompilerManager,
                                     decompiler,
+                                    allowVineflowerFallback,
                                     workspace,
                                     classInfo
                             )
@@ -137,14 +141,21 @@ public final class SearchCodeTool implements McpTool {
     @Override
     public JsonObject execute(JsonObject arguments) {
         SearchToolSupport.Request request = SearchToolSupport.parse(arguments, ARGUMENTS);
-        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true);
+        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true, true);
         String filter = ToolArguments.optionalString(arguments, "filter");
         String requestedDecompiler = ToolArguments.optionalString(arguments, "decompiler");
         boolean allowLargeScan = ToolArguments.bool(arguments, "allow_large_scan", false);
+        int perClassTimeoutSec = ToolArguments.integer(
+                arguments,
+                DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
+                DEFAULT_PER_CLASS_TIMEOUT_SEC,
+                1,
+                DecompilerToolSupport.MAX_PER_CLASS_TIMEOUT_SEC
+        );
         if (filter != null && filter.length() > MAX_FILTER_LENGTH) {
             throw new IllegalArgumentException("filter is too long");
         }
-        Predicate<String> lineMatcher = SearchToolSupport.matcher(
+        Predicate<String> lineMatcher = SearchToolSupport.unicodeAwareMatcher(
                 request.text(),
                 request.regex()
         );
@@ -169,6 +180,13 @@ public final class SearchCodeTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        JsonObject selectionError = ClassToolSupport.validateSelection(
+                workspace.getPrimaryResource(),
+                selection
+        );
+        if (selectionError != null) {
+            return selectionError;
+        }
         List<ClassToolSupport.Entry> availableClasses = ClassToolSupport.entries(
                 workspace.getPrimaryResource(),
                 selection
@@ -188,52 +206,89 @@ public final class SearchCodeTool implements McpTool {
             );
         }
         JsonArray page = new JsonArray();
+        JsonArray failedClassesArray = new JsonArray();
+        JsonArray fallbackClassesArray = new JsonArray();
         int total = 0;
         int failedClasses = 0;
+        int fallbackClasses = 0;
+        int timedOutClasses = 0;
         int scannedClasses = 0;
         boolean collectionTruncated = false;
-        Deque<PendingDecompilation> pending = new ArrayDeque<>();
-        int nextClassIndex = fillPending(
+        Deque<DecompilerToolSupport.PendingDecompilation> pending = new ArrayDeque<>();
+        int nextClassIndex = DecompilerToolSupport.fillPending(
                 pending,
                 classes,
                 0,
+                MAX_IN_FLIGHT_DECOMPILATIONS,
                 workspace,
-                decompiler
+                decompiler.operation()::run
         );
         try {
             search:
             while (!pending.isEmpty()) {
                 ToolCancellation.check();
-                PendingDecompilation current = pending.getFirst();
+                DecompilerToolSupport.PendingDecompilation current = pending.removeFirst();
                 scannedClasses++;
-                DecompileResult result;
-                try {
-                    result = current.result().get();
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    throw new CancellationException("tool operation was cancelled");
-                } catch (ExecutionException ex) {
-                    ToolCancellation.propagateIfRequested(ex.getCause());
-                    result = null;
-                } catch (CancellationException ex) {
-                    ToolCancellation.propagateIfRequested(ex);
-                    result = null;
+                DecompilerToolSupport.AwaitOutcome outcome =
+                        DecompilerToolSupport.awaitPending(current, perClassTimeoutSec);
+                if (outcome.timedOut()) {
+                    timedOutClasses++;
                 }
-                pending.removeFirst();
-                if (result == null
-                        || result.getType() != DecompileResult.ResultType.SUCCESS
-                        || result.getText() == null) {
+                DecompileResult result = outcome.result();
+                String searchableText = null;
+                String sourceKind = "decompiled_java";
+                if (result != null
+                        && result.getType() == DecompileResult.ResultType.SUCCESS
+                        && result.getText() != null) {
+                    searchableText = result.getText();
+                } else if (current.entry().scope() == ClassToolSupport.Scope.ANDROID) {
+                    try {
+                        searchableText = AndroidAssemblySupport.disassembleClass(
+                                current.entry().classInfo().asAndroidClass()
+                        );
+                        sourceKind = "dalvik_jasm_fallback";
+                        fallbackClasses++;
+                        if (fallbackClassesArray.size() < 50) {
+                            JsonObject fallbackItem = new JsonObject();
+                            fallbackItem.addProperty("class_name", current.entry().className());
+                            ClassToolSupport.addHitIdentity(fallbackItem, current.entry());
+                            String fbReason = outcome.failureMessage() != null
+                                    ? outcome.failureMessage()
+                                    : (result != null && result.getException() != null
+                                            ? result.getException().getClass().getSimpleName()
+                                            : "decompilation_unavailable");
+                            fallbackItem.addProperty("reason", fbReason);
+                            fallbackClassesArray.add(fallbackItem);
+                        }
+                    } catch (Exception fallbackEx) {
+                        ToolCancellation.propagateIfRequested(fallbackEx);
+                    }
+                }
+                if (searchableText == null) {
                     failedClasses++;
-                    nextClassIndex = fillPending(
+                    if (failedClassesArray.size() < 50) {
+                        JsonObject failedItem = new JsonObject();
+                        failedItem.addProperty("class_name", current.entry().className());
+                        ClassToolSupport.addHitIdentity(failedItem, current.entry());
+                        String reason = outcome.failureMessage() != null
+                                ? outcome.failureMessage()
+                                : (result != null && result.getException() != null
+                                        ? result.getException().getClass().getSimpleName()
+                                        : "decompilation_unavailable");
+                        failedItem.addProperty("reason", reason);
+                        failedClassesArray.add(failedItem);
+                    }
+                    nextClassIndex = DecompilerToolSupport.fillPending(
                             pending,
                             classes,
                             nextClassIndex,
+                            MAX_IN_FLIGHT_DECOMPILATIONS,
                             workspace,
-                            decompiler
+                            decompiler.operation()::run
                     );
                     continue;
                 }
-                String[] lines = result.getText().split("\\R", -1);
+                String[] lines = searchableText.split("\\R", -1);
                 for (int lineIndex = 0; lineIndex < lines.length; lineIndex++) {
                     ToolCancellation.check();
                     String line = lines[lineIndex];
@@ -245,27 +300,28 @@ public final class SearchCodeTool implements McpTool {
                         break search;
                     }
                     if (SearchToolSupport.inPage(total, request)) {
-                        page.add(hit(current.entry(), lineIndex + 1, line));
+                        page.add(hit(current.entry(), lineIndex + 1, line, sourceKind));
                     }
                     total++;
                 }
-                nextClassIndex = fillPending(
+                nextClassIndex = DecompilerToolSupport.fillPending(
                         pending,
                         classes,
                         nextClassIndex,
+                        MAX_IN_FLIGHT_DECOMPILATIONS,
                         workspace,
-                        decompiler
+                        decompiler.operation()::run
                 );
             }
         } finally {
-            drainPending(pending);
+            DecompilerToolSupport.drainPending(pending);
         }
 
         JsonObject structuredContent = new JsonObject();
         structuredContent.add("hits", page);
         structuredContent.addProperty(
                 "scope",
-                ClassToolSupport.outputScope(selection.scope(), true)
+                ClassToolSupport.outputScope(selection.scope(), true, selection)
         );
         structuredContent.addProperty("requested_scope", selection.scope().value());
         if (selection.dexName() == null) {
@@ -273,6 +329,7 @@ public final class SearchCodeTool implements McpTool {
         } else {
             structuredContent.addProperty("dex_name", selection.dexName());
         }
+        ClassToolSupport.addSelectionMetadata(structuredContent, selection);
         structuredContent.addProperty(
                 "android_decompilation_input",
                 selection.scope().includesAndroid()
@@ -281,6 +338,10 @@ public final class SearchCodeTool implements McpTool {
         );
         structuredContent.addProperty("decompiler", decompiler.name());
         structuredContent.addProperty("decompiler_version", decompiler.version());
+        structuredContent.addProperty(
+                DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
+                perClassTimeoutSec
+        );
         structuredContent.addProperty(
                 "max_in_flight_decompilations",
                 MAX_IN_FLIGHT_DECOMPILATIONS
@@ -297,8 +358,24 @@ public final class SearchCodeTool implements McpTool {
         }
         structuredContent.addProperty("classes_selected", classes.size());
         structuredContent.addProperty("classes_scanned", scannedClasses);
+        structuredContent.addProperty("classes_fallback", fallbackClasses);
+        structuredContent.add("fallback_classes", fallbackClassesArray);
+        structuredContent.addProperty(
+                "fallback_classes_truncated",
+                fallbackClasses > fallbackClassesArray.size()
+        );
         structuredContent.addProperty("classes_failed", failedClasses);
+        structuredContent.addProperty("classes_timed_out", timedOutClasses);
+        structuredContent.add("failed_classes", failedClassesArray);
+        structuredContent.addProperty("failed_classes_truncated", failedClasses > failedClassesArray.size());
         structuredContent.addProperty("collection_truncated", collectionTruncated);
+        if (total == 0) {
+            ClassToolSupport.addScopeDiagnostics(
+                    structuredContent,
+                    workspace.getPrimaryResource(),
+                    selection
+            );
+        }
         SearchToolSupport.addPageMetadata(
                 structuredContent,
                 request,
@@ -329,7 +406,11 @@ public final class SearchCodeTool implements McpTool {
                 "decompiler",
                 DecompilerToolSupport.inputSchemaProperty(decompilers)
         );
-        ClassToolSupport.addScopeProperties(schema.getAsJsonObject("properties"), true);
+        schema.getAsJsonObject("properties").add(
+                DecompilerToolSupport.PER_CLASS_TIMEOUT_ARGUMENT,
+                DecompilerToolSupport.timeoutSchemaProperty(DEFAULT_PER_CLASS_TIMEOUT_SEC)
+        );
+        ClassToolSupport.addScopeProperties(schema.getAsJsonObject("properties"), true, true, true);
         JsonObject allowLargeScan = new JsonObject();
         allowLargeScan.addProperty("type", "boolean");
         allowLargeScan.addProperty("default", false);
@@ -391,48 +472,14 @@ public final class SearchCodeTool implements McpTool {
         return McpTool.errorResult(message, structured);
     }
 
-    private static int fillPending(Deque<PendingDecompilation> pending,
-                                   List<ClassToolSupport.Entry> classes,
-                                   int nextClassIndex,
-                                   Workspace workspace,
-                                   SelectedDecompiler decompiler) {
-        while (pending.size() < MAX_IN_FLIGHT_DECOMPILATIONS
-                && nextClassIndex < classes.size()) {
-            ToolCancellation.check();
-            ClassToolSupport.Entry entry = classes.get(nextClassIndex++);
-            CompletableFuture<DecompileResult> result;
-            try {
-                JvmClassInfo classInfo = entry.scope() == ClassToolSupport.Scope.ANDROID
-                        ? AndroidJvmConverter.convert(entry.classInfo().asAndroidClass())
-                        : entry.classInfo().asJvmClass();
-                result = Objects.requireNonNull(
-                        decompiler.operation().run(workspace, classInfo),
-                        "decompilation future"
-                );
-            } catch (Exception ex) {
-                result = CompletableFuture.failedFuture(ex);
-            }
-            pending.addLast(new PendingDecompilation(entry, result));
-        }
-        return nextClassIndex;
-    }
-
-    private static void drainPending(Deque<PendingDecompilation> pending) {
-        while (!pending.isEmpty()) {
-            try {
-                pending.removeFirst().result().join();
-            } catch (CancellationException | CompletionException ignored) {
-                // Draining is about task lifetime, not result handling.
-            }
-        }
-    }
-
     private static JsonObject hit(ClassToolSupport.Entry entry,
                                   int lineNumber,
-                                  String line) {
+                                  String line,
+                                  String sourceKind) {
         JsonObject hit = new JsonObject();
         hit.addProperty("class_name", entry.className());
         ClassToolSupport.addHitIdentity(hit, entry);
+        hit.addProperty("source_kind", sourceKind);
         hit.addProperty("line_number", lineNumber);
         boolean truncated = line.length() > MAX_LINE_LENGTH;
         hit.addProperty("line", truncated ? line.substring(0, MAX_LINE_LENGTH) : line);
@@ -464,9 +511,5 @@ public final class SearchCodeTool implements McpTool {
             Objects.requireNonNull(version, "version");
             Objects.requireNonNull(operation, "operation");
         }
-    }
-
-    private record PendingDecompilation(ClassToolSupport.Entry entry,
-                                        CompletableFuture<DecompileResult> result) {
     }
 }

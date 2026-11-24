@@ -45,10 +45,17 @@ final class AndroidInstructionSupport {
     static MethodCode exact(ClassToolSupport.Entry entry,
                             String name,
                             String descriptor) {
-        MethodMember method = entry.classInfo()
+        var backing = entry.classInfo()
                 .asAndroidClass()
-                .getBackingDefinition()
-                .getMethod(name, descriptor);
+                .getBackingDefinition();
+        MethodMember method = backing.getMethod(name, descriptor);
+        if (method == null) {
+            String normName = ClassToolSupport.normalizeUnicodeInput(name);
+            String normDesc = ClassToolSupport.normalizeUnicodeInput(descriptor);
+            if (!Objects.equals(normName, name) || !Objects.equals(normDesc, descriptor)) {
+                method = backing.getMethod(normName, normDesc);
+            }
+        }
         if (method == null) {
             return null;
         }

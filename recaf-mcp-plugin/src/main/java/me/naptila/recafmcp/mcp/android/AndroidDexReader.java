@@ -27,8 +27,8 @@ import java.util.HashMap;
 import java.util.List;
 
 /**
- * Reads DEX trees without the pinned library's encoded-value extension bug or
- * Recaf's global debug-info opt-out. Only detached low-level items are repaired;
+ * Reads DEX trees without the pinned library's encoded-value extension bug and
+ * with debug-info decoding forced on. Only detached low-level items are repaired;
  * no runtime classes, codecs or original input bytes are replaced.
  */
 public final class AndroidDexReader {
@@ -63,8 +63,8 @@ public final class AndroidDexReader {
         try {
             DexHeader header = DexHeader.CODEC.read(Input.wrap(bytes));
             repairValues(bytes, header.map());
-            // Recaf disables this flag in BasicInfoImporter. Restore it after
-            // our detached read so unrelated Recaf operations retain their policy.
+            // Force debug-table decoding during our detached read and restore
+            // the previous global setting afterward.
             synchronized (CodeCodec.class) {
                 boolean previous = CodeCodec.readDebug;
                 try {

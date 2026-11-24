@@ -1,16 +1,21 @@
 package me.naptila.recafmcp.mcp.tools;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import me.naptila.recafmcp.mcp.McpTool;
 import software.coley.recaf.info.properties.builtin.InputFilePathProperty;
 import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.workspace.model.Workspace;
+import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
 import software.coley.recaf.workspace.model.resource.WorkspaceFileResource;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -20,6 +25,7 @@ import java.util.function.Supplier;
  * Returns a bounded summary of the current Recaf workspace.
  */
 public final class WorkspaceInfoTool implements McpTool {
+    private static final int MAX_EMBEDDED_SUMMARY_ENTRIES = 200;
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
 
     private final BooleanSupplier hasWorkspace;
@@ -41,7 +47,7 @@ public final class WorkspaceInfoTool implements McpTool {
 
     @Override
     public String description() {
-        return "Summarize the open Recaf workspace.";
+        return "Summarize the open Recaf workspace, including Android DEX bundles and embedded JARs.";
     }
 
     @Override
@@ -81,7 +87,14 @@ public final class WorkspaceInfoTool implements McpTool {
         primaryResult.addProperty("android_class_count", androidClasses);
         primaryResult.addProperty("class_count", classCount);
         primaryResult.addProperty("file_count", files);
-        primaryResult.addProperty("embedded_resource_count", countEmbeddedResources(primary));
+        primaryResult.add("android_bundles", androidBundlesJson(primary));
+        List<ClassToolSupport.ScopedResource> embeddedList = ClassToolSupport.embeddedResources(primary);
+        primaryResult.addProperty("embedded_resource_count", embeddedList.size());
+        primaryResult.add("embedded_resources", embeddedResourcesJson(embeddedList));
+        primaryResult.addProperty(
+                "embedded_resources_truncated",
+                embeddedList.size() > MAX_EMBEDDED_SUMMARY_ENTRIES
+        );
         primaryResult.addProperty("dirty_item_count", countDirtyItems(primary));
         primaryResult.addProperty("removed_item_count", countRemovedItems(primary));
 
@@ -101,6 +114,52 @@ public final class WorkspaceInfoTool implements McpTool {
         return McpTool.successResult(text, structuredContent);
     }
 
+    private static JsonArray androidBundlesJson(WorkspaceResource primary) {
+        JsonArray bundles = new JsonArray();
+        List<Map.Entry<String, AndroidClassBundle>> sorted = new ArrayList<>(
+                primary.getAndroidClassBundles().entrySet()
+        );
+        sorted.sort(Map.Entry.comparingByKey());
+        for (Map.Entry<String, AndroidClassBundle> entry : sorted) {
+            AndroidClassBundle bundle = entry.getValue();
+            JsonObject item = new JsonObject();
+            item.addProperty("dex_name", entry.getKey());
+            item.addProperty("class_count", bundle.size());
+            item.addProperty("dex_version", bundle.getVersion());
+            item.addProperty("dirty_count", bundle.getDirtyKeys().size());
+            bundles.add(item);
+        }
+        return bundles;
+    }
+
+    private static JsonArray embeddedResourcesJson(
+            List<ClassToolSupport.ScopedResource> embeddedResources) {
+        JsonArray array = new JsonArray();
+        embeddedResources.stream()
+                .sorted(Comparator.comparing(ClassToolSupport.ScopedResource::path))
+                .limit(MAX_EMBEDDED_SUMMARY_ENTRIES)
+                .forEach(item -> {
+                    WorkspaceResource resource = item.resource();
+                    int jvm = resource.getJvmClassBundle().size();
+                    int versioned = resource.getVersionedJvmClassBundles().values().stream()
+                            .mapToInt(Map::size)
+                            .sum();
+                    int android = resource.getAndroidClassBundles().values().stream()
+                            .mapToInt(Map::size)
+                            .sum();
+                    int fileCount = resource.getFileBundle().size();
+                    JsonObject obj = new JsonObject();
+                    obj.addProperty("path", item.path());
+                    obj.addProperty("jvm_class_count", jvm);
+                    obj.addProperty("versioned_jvm_class_count", versioned);
+                    obj.addProperty("android_class_count", android);
+                    obj.addProperty("class_count", jvm + versioned + android);
+                    obj.addProperty("file_count", fileCount);
+                    array.add(obj);
+                });
+        return array;
+    }
+
     private static void addPrimaryNameAndPath(JsonObject result, WorkspaceResource primary) {
         if (primary instanceof WorkspaceFileResource fileResource) {
             result.addProperty("name", fileResource.getFileInfo().getName());
@@ -116,14 +175,7 @@ public final class WorkspaceInfoTool implements McpTool {
         }
     }
 
-    private static int countEmbeddedResources(WorkspaceResource resource) {
-        return resource.getEmbeddedResources().size()
-                + resource.getEmbeddedResources().values().stream()
-                .mapToInt(WorkspaceInfoTool::countEmbeddedResources)
-                .sum();
-    }
-
-    private static int countDirtyItems(WorkspaceResource resource) {
+    static int countDirtyItems(WorkspaceResource resource) {
         return resource.classBundleStreamRecursive()
                 .mapToInt(bundle -> bundle.getDirtyKeys().size())
                 .sum()
@@ -132,7 +184,7 @@ public final class WorkspaceInfoTool implements McpTool {
                 .sum();
     }
 
-    private static int countRemovedItems(WorkspaceResource resource) {
+    static int countRemovedItems(WorkspaceResource resource) {
         return resource.classBundleStreamRecursive()
                 .mapToInt(bundle -> bundle.getRemovedKeys().size())
                 .sum()

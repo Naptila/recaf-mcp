@@ -31,7 +31,12 @@ public final class GetClassBytecodeTool implements McpTool {
     private static final int DEFAULT_CHUNK_SIZE = 32 * 1024;
     private static final int MAX_CHUNK_SIZE = 1024 * 1024;
     private static final Set<String> ARGUMENTS = Set.of(
-            "class_name", "scope", "dex_name", "offset", "limit",
+            "class_name",
+            "scope",
+            "dex_name",
+            ClassToolSupport.RESOURCE_ARGUMENT,
+            "offset",
+            "limit",
             ConditionalReadSupport.ARGUMENT
     );
     private static final JsonObject INPUT_SCHEMA = createInputSchema();
@@ -82,18 +87,35 @@ public final class GetClassBytecodeTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        var primary = workspace.getPrimaryResource();
+        JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
+        if (selectionError != null) {
+            return selectionError;
+        }
         List<ClassToolSupport.Entry> matches = ClassToolSupport.exact(
-                workspace.getPrimaryResource(),
+                primary,
                 selection,
                 className
         );
         if (matches.isEmpty()) {
-            return error(
-                    "class not found in requested primary scope",
+            JsonObject err = error(
+                    "class not found in requested scope",
                     className,
                     selection,
                     matches
             );
+            ClassToolSupport.addScopeDiagnostics(
+                    err.getAsJsonObject("structuredContent"),
+                    primary,
+                    selection
+            );
+            ClassToolSupport.addDidYouMeanClasses(
+                    err.getAsJsonObject("structuredContent"),
+                    primary,
+                    selection,
+                    className
+            );
+            return err;
         }
         if (matches.size() > 1) {
             return error(
@@ -110,7 +132,8 @@ public final class GetClassBytecodeTool implements McpTool {
         try {
             if (target.scope() == ClassToolSupport.Scope.ANDROID) {
                 AndroidClassInfo androidClassInfo = target.classInfo().asAndroidClass();
-                dexVersion = workspace.getPrimaryResource()
+                var targetRes = target.resource() == null ? primary : target.resource();
+                dexVersion = targetRes
                         .getAndroidClassBundles()
                         .get(target.dexName())
                         .getVersion();
@@ -142,9 +165,14 @@ public final class GetClassBytecodeTool implements McpTool {
         String sha256 = sha256(bytecode);
         structured.addProperty("sha256", sha256);
         if (jvmClassInfo != null) {
+            var targetRes = target.resource() == null ? primary : target.resource();
+            boolean dirty = isDirtyJvmClass(targetRes, jvmClassInfo);
             structured.addProperty("format", "jvm_classfile");
-            structured.addProperty("representation", "original_classfile");
-            structured.addProperty("original_bytes", true);
+            structured.addProperty(
+                    "representation",
+                    dirty ? "modified_classfile" : "original_classfile"
+            );
+            structured.addProperty("original_bytes", !dirty);
             structured.addProperty("classfile_version", jvmClassInfo.getVersion());
             structured.addProperty("java_version", jvmClassInfo.getVersion() - 44);
             structured.add("dex_version", JsonNull.INSTANCE);
@@ -206,6 +234,16 @@ public final class GetClassBytecodeTool implements McpTool {
         return AndroidDexReader.encodeClass(classInfo, dexVersion);
     }
 
+    private static boolean isDirtyJvmClass(
+            software.coley.recaf.workspace.model.resource.WorkspaceResource resource,
+            JvmClassInfo classInfo) {
+        if (resource.getJvmClassBundle().getDirtyKeys().contains(classInfo.getName())) {
+            return true;
+        }
+        return resource.getVersionedJvmClassBundles().values().stream()
+                .anyMatch(bundle -> bundle.getDirtyKeys().contains(classInfo.getName()));
+    }
+
     private static String exceptionMessage(Throwable throwable) {
         String message = throwable.getMessage();
         return message == null || message.isBlank()
@@ -245,7 +283,7 @@ public final class GetClassBytecodeTool implements McpTool {
                 ConditionalReadSupport.ARGUMENT,
                 ConditionalReadSupport.schemaProperty()
         );
-        ClassToolSupport.addScopeProperties(properties, false);
+        ClassToolSupport.addScopeProperties(properties, false, true, false);
         JsonArray required = new JsonArray();
         required.add("class_name");
         JsonObject schema = new JsonObject();

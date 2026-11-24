@@ -85,7 +85,12 @@ public final class ApplyMappingsTool implements McpTool {
                                         aggregateMappingManager
                                 )
                         )
-                        : prepare(workspace, mappings, mappingApplierService),
+                        : prepare(
+                                workspace,
+                                mappings,
+                                mappingApplierService,
+                                inheritanceGraphService
+                        ),
                 MappingToolSupport.descriptors(formatManager)
         );
     }
@@ -193,7 +198,7 @@ public final class ApplyMappingsTool implements McpTool {
         }
         if (prepared.classChanges().isEmpty()
                 || selectedChanges(prepared.classChanges(), request.scope()) == 0) {
-            return error(
+            JsonObject noMatch = error(
                     "mappings did not match or change any primary "
                             + request.scope().value() + " classes",
                     request,
@@ -201,6 +206,14 @@ public final class ApplyMappingsTool implements McpTool {
                     counts,
                     prepared
             );
+            addDirectionHintIfReversed(
+                    noMatch.getAsJsonObject("structuredContent"),
+                    workspace,
+                    parsed,
+                    descriptor.name(),
+                    request.scope()
+            );
+            return noMatch;
         }
 
         boolean applied = false;
@@ -221,10 +234,16 @@ public final class ApplyMappingsTool implements McpTool {
                 );
             }
         }
+        EntryPointMetadataSupport.SyncResult manifestSync = syncManifests(
+                workspace,
+                prepared.classChanges(),
+                applied
+        );
 
-        JsonObject structured = metadata(request, descriptor);
+        JsonObject structured = metadata(request, descriptor, false);
         MappingToolSupport.addCounts(structured, counts);
         addChanges(structured, request, prepared);
+        EntryPointMetadataSupport.addSyncMetadata(structured, manifestSync);
         structured.addProperty("applied", applied);
         MappingMutationSupport.addPersistenceMetadata(structured, workspace, applied);
         String message = request.dryRun()
@@ -235,11 +254,65 @@ public final class ApplyMappingsTool implements McpTool {
         return McpTool.successResult(message, structured);
     }
 
+    private static EntryPointMetadataSupport.SyncResult syncManifests(
+            Workspace workspace,
+            List<ClassChange> changes,
+            boolean apply) {
+        java.util.Map<String, String> jvmRenames = new java.util.LinkedHashMap<>();
+        java.util.Map<String, String> androidRenames = new java.util.LinkedHashMap<>();
+        for (ClassChange change : changes) {
+            if (!change.renamed()) {
+                continue;
+            }
+            if (change.scope() == ClassToolSupport.Scope.ANDROID) {
+                androidRenames.put(change.oldName(), change.newName());
+            } else {
+                jvmRenames.put(change.oldName(), change.newName());
+            }
+        }
+        return EntryPointMetadataSupport.syncClassRenames(
+                workspace,
+                jvmRenames,
+                androidRenames,
+                apply
+        );
+    }
+
     private static PreparedMapping prepare(Workspace workspace,
                                            Mappings mappings,
                                            MappingApplierService service) {
+        return prepare(workspace, mappings, service, null);
+    }
+
+    private static PreparedMapping prepare(Workspace workspace,
+                                           Mappings mappings,
+                                           MappingApplierService service,
+                                           InheritanceGraphService inheritanceGraphService) {
+        Mappings effectiveMappings = mappings;
+        if (mappings instanceof IntermediateMappings intermediate
+                && !(mappings instanceof UniqueKeyMappings)) {
+            software.coley.recaf.services.inheritance.InheritanceGraph graph =
+                    inheritanceGraphService != null
+                            ? inheritanceGraphService.getOrCreateInheritanceGraph(workspace)
+                            : new software.coley.recaf.services.inheritance.InheritanceGraph(workspace);
+            IntermediateMappings expanded =
+                    MappingMutationSupport.expandPrimaryOuterInnerAndMethodFamilies(
+                            workspace,
+                            intermediate,
+                            graph
+                    );
+            software.coley.recaf.services.mapping.MappingsAdapter adapter =
+                    new software.coley.recaf.services.mapping.MappingsAdapter(
+                            mappings.doesSupportFieldTypeDifferentiation(),
+                            mappings.doesSupportVariableTypeDifferentiation()
+                    );
+            adapter.importIntermediate(expanded);
+            adapter.enableClassLookup(workspace);
+            adapter.enableHierarchyLookup(graph);
+            effectiveMappings = adapter;
+        }
         MappingResults results = service.inWorkspace(workspace)
-                .applyToPrimaryResource(mappings);
+                .applyToPrimaryResource(effectiveMappings);
         List<ClassChange> changes = MappingMutationSupport.summarize(workspace, results)
                 .changes().stream()
                 .map(change -> new ClassChange(
@@ -253,7 +326,11 @@ public final class ApplyMappingsTool implements McpTool {
                 .map(path -> path.getValue())
                 .toList();
         String conflict = validate(workspace, postClasses, changes);
-        return new PreparedMapping(changes, conflict, results::apply);
+        return new PreparedMapping(changes, conflict, () -> {
+            MappingMutationSupport.preserveOriginalClassNames(null, results);
+            results.apply();
+            MappingMutationSupport.preserveOriginalClassNames(workspace, results);
+        });
     }
 
     private static PreparedMapping prepareTargeted(Workspace workspace,
@@ -375,7 +452,7 @@ public final class ApplyMappingsTool implements McpTool {
                              MappingToolSupport.Descriptor descriptor,
                              MappingToolSupport.MappingCounts counts,
                              PreparedMapping prepared) {
-        JsonObject structured = metadata(request, descriptor);
+        JsonObject structured = metadata(request, descriptor, true);
         if (counts != null) {
             MappingToolSupport.addCounts(structured, counts);
         }
@@ -390,9 +467,15 @@ public final class ApplyMappingsTool implements McpTool {
     }
 
     private JsonObject metadata(Request request,
-                                MappingToolSupport.Descriptor descriptor) {
+                                MappingToolSupport.Descriptor descriptor,
+                                boolean includeAvailableFormats) {
         JsonObject structured = new JsonObject();
-        MappingToolSupport.addFormatMetadata(structured, descriptor, formats);
+        MappingToolSupport.addFormatMetadata(
+                structured,
+                descriptor,
+                formats,
+                includeAvailableFormats
+        );
         structured.addProperty(
                 "scope",
                 ClassToolSupport.outputScope(request.scope(), false)
@@ -449,7 +532,9 @@ public final class ApplyMappingsTool implements McpTool {
         mappings.addProperty("maxLength", MappingToolSupport.MAX_MAPPING_TEXT_LENGTH);
         mappings.addProperty(
                 "description",
-                "Inline source-to-destination mapping document."
+                "Inline current-to-target mapping document. Note: in Recaf 'Proguard' format "
+                        + "('original -> obfuscated:'), the right-hand obfuscated name matches "
+                        + "current workspace classes and renames them to the left-hand original name."
         );
         properties.add("mappings", mappings);
 
@@ -483,7 +568,7 @@ public final class ApplyMappingsTool implements McpTool {
         schema.addProperty(
                 "description",
                 "Applies in memory; scope requires a matching-domain change but may "
-                        + "rewrite cross-domain references. APK save is unsupported."
+                        + "rewrite cross-domain references. Persist changes with recaf_save or recaf_close."
         );
         schema.add("properties", properties);
         schema.add("required", required);
@@ -567,6 +652,43 @@ public final class ApplyMappingsTool implements McpTool {
         return (int) changes.stream()
                 .filter(change -> change.scope() == scope)
                 .count();
+    }
+
+    private static void addDirectionHintIfReversed(JsonObject structured,
+                                                   Workspace workspace,
+                                                   IntermediateMappings parsed,
+                                                   String formatName,
+                                                   ClassToolSupport.Scope scope) {
+        var primary = workspace.getPrimaryResource();
+        ClassToolSupport.Selection checkSelection = new ClassToolSupport.Selection(scope, null);
+        int reversedMatches = 0;
+        for (var classMapping : parsed.getClasses().values()) {
+            String targetName = classMapping.getNewName();
+            String sourceName = classMapping.getOldName();
+            if (targetName == null || targetName.equals(sourceName)) {
+                continue;
+            }
+            if (!ClassToolSupport.exact(primary, checkSelection, targetName).isEmpty()
+                    && ClassToolSupport.exact(primary, checkSelection, sourceName).isEmpty()) {
+                reversedMatches++;
+            }
+        }
+        if (reversedMatches <= 0) {
+            return;
+        }
+        structured.addProperty("reversed_target_matches", reversedMatches);
+        String hint = "Proguard".equalsIgnoreCase(formatName)
+                ? "0 current workspace classes matched mapping source names, but "
+                        + reversedMatches
+                        + " target name(s) exist in the workspace. In Recaf Proguard format "
+                        + "('original -> obfuscated:'), the right-hand side is matched against "
+                        + "current workspace names and renamed to the left-hand side; swap the "
+                        + "sides ('target -> current:') or use Simple/SRG/Tiny-v2 format."
+                : "0 current workspace classes matched mapping source names, but "
+                        + reversedMatches
+                        + " target name(s) exist in the workspace; your source and target "
+                        + "columns appear to be reversed.";
+        structured.addProperty("direction_hint", hint);
     }
 
 }
