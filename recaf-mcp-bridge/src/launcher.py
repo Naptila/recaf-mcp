@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import locale
 import os
 import re
 import secrets
@@ -29,6 +30,56 @@ from sessions import (
     SessionManager,
     new_session_timestamp,
 )
+
+
+_JAVA_PROBE_TIMEOUT_SEC = 5.0
+_JAVA_PROBE_MAX_OUTPUT_BYTES = 262144
+_JAVA_HOME_PATTERN = re.compile(r"^\s*java\.home\s*=\s*(.+?)\s*$")
+_MAX_ANCESTOR_PIDS = 16
+_RESOLVED_JAVA_COMMANDS: dict[str, str] = {}
+
+if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+    import ctypes
+    from ctypes import wintypes
+
+    _PROCESS_TERMINATE = 0x0001
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _SYNCHRONIZE = 0x00100000
+    _STILL_ACTIVE = 259
+    _WAIT_TIMEOUT = 0x00000102
+
+    class _FILETIME(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", wintypes.DWORD),
+            ("dwHighDateTime", wintypes.DWORD),
+        ]
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    _kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    _kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+        ctypes.POINTER(_FILETIME),
+    ]
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
+    _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    _kernel32.TerminateProcess.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
 
 
 class WorkerLaunchError(RuntimeError):
@@ -141,12 +192,269 @@ def allocate_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def resolve_worker_pid(health: Mapping[str, Any], process_pid: int) -> int | None:
+    """Return the Worker JVM PID when health matches process_pid or its ancestors."""
+    worker_pid = health.get("pid")
+    if isinstance(worker_pid, bool) or not isinstance(worker_pid, int) or worker_pid <= 0:
+        return None
+    if worker_pid == process_pid:
+        return worker_pid
+    raw_ancestors = health.get("ancestor_pids")
+    if isinstance(raw_ancestors, list):
+        for ancestor in raw_ancestors[:_MAX_ANCESTOR_PIDS]:
+            if (
+                not isinstance(ancestor, bool)
+                and isinstance(ancestor, int)
+                and ancestor == process_pid
+            ):
+                return worker_pid
+    return None
+
+
+def windows_process_creation_time(pid: int) -> int | None:
+    """Return the 64-bit Win32 creation FILETIME of a live process, or None."""
+    if os.name != "nt" or pid <= 0:
+        return None
+    access = _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE
+    has_sync = True
+    handle = _kernel32.OpenProcess(access, False, pid)
+    if not handle:
+        has_sync = False
+        handle = _kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+    if not handle:
+        return None
+    try:
+        if has_sync:
+            if _kernel32.WaitForSingleObject(handle, 0) != _WAIT_TIMEOUT:
+                return None
+        else:
+            exit_code = wintypes.DWORD()
+            if (
+                not _kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                or exit_code.value != _STILL_ACTIVE
+            ):
+                return None
+        created = _FILETIME()
+        exited = _FILETIME()
+        kernel = _FILETIME()
+        user = _FILETIME()
+        if not _kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def _windows_is_worker_alive(
+    pid: int,
+    expected_create_time: int | None,
+) -> bool:
+    current = windows_process_creation_time(pid)
+    if current is None:
+        return False
+    if expected_create_time is not None and current != expected_create_time:
+        return False
+    return True
+
+
+def _windows_terminate_pid(
+    pid: int,
+    expected_create_time: int | None,
+) -> None:
+    if os.name != "nt" or pid <= 0:
+        return
+    handle = _kernel32.OpenProcess(
+        _PROCESS_TERMINATE | _PROCESS_QUERY_LIMITED_INFORMATION,
+        False,
+        pid,
+    )
+    if not handle:
+        return
+    try:
+        if expected_create_time is not None:
+            created = _FILETIME()
+            exited = _FILETIME()
+            kernel = _FILETIME()
+            user = _FILETIME()
+            if not _kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return
+            actual = (int(created.dwHighDateTime) << 32) | int(
+                created.dwLowDateTime
+            )
+            if actual != expected_create_time:
+                return
+        _kernel32.TerminateProcess(handle, 1)
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def _windows_taskkill_executable() -> str:
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        candidate = Path(system_root) / "System32" / "taskkill.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("taskkill") or "taskkill"
+
+
+def _posix_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _signal_posix_worker(
+    group_pid: int,
+    extra_worker_pid: int | None,
+    sig: signal.Signals,
+) -> None:
+    try:
+        os.killpg(group_pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if extra_worker_pid is not None:
+        try:
+            os.kill(extra_worker_pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+async def _wait_posix_pid_exit(pid: int, timeout_sec: float) -> None:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not _posix_pid_alive(pid):
+            return
+        await anyio.sleep(0.05)
+
+
+def _extract_java_executable_from_settings(output: str) -> str | None:
+    binary_names = ("java.exe", "java") if os.name == "nt" else ("java", "java.exe")
+    for line in output.splitlines():
+        match = _JAVA_HOME_PATTERN.match(line)
+        if match is None:
+            continue
+        java_home = Path(match.group(1).strip())
+        for binary_name in binary_names:
+            candidate = java_home / "bin" / binary_name
+            try:
+                if not candidate.is_file():
+                    continue
+                if os.name != "nt" and not os.access(candidate, os.X_OK):
+                    continue
+                try:
+                    canonical = candidate.resolve(strict=True)
+                except OSError:
+                    canonical = candidate.absolute()
+                return str(canonical)
+            except OSError:
+                continue
+    return None
+
+
+async def resolve_java_command(
+    java_command: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve shims/wrappers to <java.home>/bin/java(.exe) once per java_command."""
+    cached = _RESOLVED_JAVA_COMMANDS.get(java_command)
+    if cached is not None:
+        return cached
+
+    env = dict(os.environ if environment is None else environment)
+    for option_var in (
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "RECAF_MCP_TOKEN",
+    ):
+        env.pop(option_var, None)
+
+    probe_executable = java_command
+    if os.name == "nt":
+        which_match = shutil.which(java_command, path=env.get("PATH"))
+        if which_match is not None:
+            probe_executable = which_match
+
+    probe_process: Process | None = None
+    output_chunks: list[bytes] = []
+    try:
+        with anyio.move_on_after(_JAVA_PROBE_TIMEOUT_SEC) as probe_scope:
+            probe_process = await anyio.open_process(
+                [probe_executable, "-XshowSettings:properties", "-version"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=(os.name == "posix"),
+            )
+            assert probe_process.stdout is not None
+            captured_bytes = 0
+            async for chunk in probe_process.stdout:
+                if captured_bytes < _JAVA_PROBE_MAX_OUTPUT_BYTES:
+                    remaining = _JAVA_PROBE_MAX_OUTPUT_BYTES - captured_bytes
+                    output_chunks.append(chunk[:remaining])
+                    captured_bytes += len(chunk)
+            await probe_process.wait()
+        if (
+            probe_scope.cancel_called
+            or probe_process is None
+            or probe_process.returncode != 0
+        ):
+            _RESOLVED_JAVA_COMMANDS[java_command] = java_command
+            return java_command
+    except OSError:
+        _RESOLVED_JAVA_COMMANDS[java_command] = java_command
+        return java_command
+    finally:
+        if probe_process is not None and probe_process.returncode is None:
+            with anyio.CancelScope(shield=True):
+                await terminate_process_group(probe_process)
+
+    raw_output = b"".join(output_chunks)
+    try:
+        decoded = raw_output.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = raw_output.decode(
+            locale.getpreferredencoding(False) or "utf-8",
+            errors="replace",
+        )
+    resolved = _extract_java_executable_from_settings(decoded)
+    effective = resolved if resolved is not None else java_command
+    _RESOLVED_JAVA_COMMANDS[java_command] = effective
+    return effective
+
+
 async def start_worker_process(
     command: Sequence[str],
     environment: Mapping[str, str],
     log_path: Path,
 ) -> Process:
     """Start one owned process group with owner-only merged diagnostics."""
+    argv = list(command)
+    if argv and os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        resolved_executable = shutil.which(argv[0], path=environment.get("PATH"))
+        if resolved_executable is not None:
+            argv[0] = resolved_executable
     descriptor = os.open(
         log_path,
         os.O_WRONLY | os.O_CREAT | os.O_APPEND,
@@ -155,7 +463,7 @@ async def start_worker_process(
     try:
         with os.fdopen(descriptor, "ab", closefd=True) as log_file:
             return await anyio.open_process(
-                list(command),
+                argv,
                 stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -170,35 +478,122 @@ async def start_worker_process(
         raise
 
 
-async def terminate_process_group(process: Process) -> None:
-    """Terminate an owned Worker process group with bounded escalation."""
-    if process.returncode is not None:
+async def _terminate_windows_worker(
+    process: Process,
+    *,
+    extra_worker_pid: int | None,
+    worker_create_time: int | None,
+    identity_check: Callable[[], bool] | None,
+) -> None:
+    if identity_check is not None and not identity_check():
         return
+    target_pids: list[int] = []
+    if process.returncode is None and process.pid > 0:
+        target_pids.append(process.pid)
+    if extra_worker_pid is not None and _windows_is_worker_alive(
+        extra_worker_pid,
+        worker_create_time,
+    ):
+        target_pids.append(extra_worker_pid)
+    if not target_pids:
+        return
+
+    taskkill_cmd = [_windows_taskkill_executable(), "/F", "/T"]
+    for pid in target_pids:
+        taskkill_cmd.extend(["/PID", str(pid)])
+
+    killer: Process | None = None
+    try:
+        with anyio.move_on_after(5):
+            killer = await anyio.open_process(
+                taskkill_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            await killer.wait()
+    except OSError:
+        pass
+    finally:
+        if killer is not None and killer.returncode is None:
+            try:
+                killer.kill()
+            except OSError:
+                pass
+            with anyio.move_on_after(1):
+                await killer.wait()
+
+    if process.returncode is None:
+        with anyio.move_on_after(5):
+            await process.wait()
+    if process.returncode is None and (
+        identity_check is None or identity_check()
+    ):
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        with anyio.move_on_after(5):
+            await process.wait()
+
+    if extra_worker_pid is not None and _windows_is_worker_alive(
+        extra_worker_pid,
+        worker_create_time,
+    ):
+        _windows_terminate_pid(extra_worker_pid, worker_create_time)
+
+
+async def terminate_process_group(
+    process: Process,
+    *,
+    worker_pid: int | None = None,
+    worker_create_time: int | None = None,
+) -> None:
+    """Terminate an owned Worker process group/tree with bounded escalation."""
     identity_check = getattr(process, "verify_identity", None)
     if callable(identity_check) and not identity_check():
         return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:  # pragma: no cover - exercised on Windows hosts
-            process.terminate()
-    except ProcessLookupError:
+
+    extra_worker_pid = (
+        worker_pid
+        if worker_pid is not None and worker_pid != process.pid
+        else None
+    )
+
+    if os.name == "posix":
+        need_signal = process.returncode is None or (
+            extra_worker_pid is not None and _posix_pid_alive(extra_worker_pid)
+        )
+        if not need_signal:
+            return
+        _signal_posix_worker(process.pid, extra_worker_pid, signal.SIGTERM)
+        if process.returncode is None:
+            with anyio.move_on_after(5):
+                await process.wait()
+        elif extra_worker_pid is not None:
+            await _wait_posix_pid_exit(extra_worker_pid, timeout_sec=5.0)
+
+        still_running = process.returncode is None or (
+            extra_worker_pid is not None and _posix_pid_alive(extra_worker_pid)
+        )
+        if not still_running:
+            return
+        if callable(identity_check) and not identity_check():
+            return
+        _signal_posix_worker(process.pid, extra_worker_pid, signal.SIGKILL)
+        if process.returncode is None:
+            with anyio.move_on_after(5):
+                await process.wait()
+        elif extra_worker_pid is not None:
+            await _wait_posix_pid_exit(extra_worker_pid, timeout_sec=5.0)
         return
-    with anyio.move_on_after(5):
-        await process.wait()
-    if process.returncode is not None:
-        return
-    if callable(identity_check) and not identity_check():
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:  # pragma: no cover - exercised on Windows hosts
-            process.kill()
-    except ProcessLookupError:
-        return
-    with anyio.move_on_after(5):
-        await process.wait()
+
+    await _terminate_windows_worker(
+        process,
+        extra_worker_pid=extra_worker_pid,
+        worker_create_time=worker_create_time,
+        identity_check=identity_check if callable(identity_check) else None,
+    )
 
 
 _SUPPORTED_INPUT_MAGIC_PREFIXES: tuple[bytes, ...] = (
@@ -296,6 +691,11 @@ class WorkerLauncher:
             if ttl < 0:
                 raise ValueError("idle_ttl_sec must not be negative")
 
+            effective_java = (
+                await resolve_java_command(self._config.java_command, os.environ)
+                if self._process_starter is start_worker_process
+                else self._config.java_command
+            )
             final_error: WorkerLaunchError | None = None
             final_log_path: Path | None = None
             final_token: str | None = None
@@ -317,10 +717,12 @@ class WorkerLauncher:
                     data_dir,
                     plugins_dir,
                     paths.input_path,
+                    java_command=effective_java,
                 )
                 environment = os.environ.copy()
                 environment["RECAF_MCP_TOKEN"] = token
                 process: Process | None = None
+                observed_worker: list[int | None] = [None, None]
                 activated = False
                 try:
                     process = await self._process_starter(
@@ -334,6 +736,7 @@ class WorkerLauncher:
                         token,
                         paths.input_path,
                         log_path,
+                        observed_worker,
                     )
                     archive_export_supported = health[
                         "workspace_archive_export_supported"
@@ -378,6 +781,8 @@ class WorkerLauncher:
                         last_touched=new_session_timestamp(),
                         idle_ttl_sec=ttl,
                         output_format=output_format,
+                        worker_pid=observed_worker[0],
+                        worker_create_time=observed_worker[1],
                     )
                     await self._sessions.activate(session)
                     activated = True
@@ -403,7 +808,11 @@ class WorkerLauncher:
                 finally:
                     if process is not None and not activated:
                         with anyio.CancelScope(shield=True):
-                            await self._process_terminator(process)
+                            await self._terminate_worker(
+                                process,
+                                observed_worker[0],
+                                observed_worker[1],
+                            )
                 if attempt < self._config.launch_attempts:
                     continue
             if final_log_path is None or final_token is None:
@@ -431,11 +840,30 @@ class WorkerLauncher:
                 await self._reservations.release(sid)
                 return
             try:
-                await self._process_terminator(session.process)
+                await self._terminate_worker(
+                    session.process,
+                    session.worker_pid,
+                    session.worker_create_time,
+                )
             finally:
                 await self._sessions.remove(sid)
                 await self._reservations.release(sid)
                 shutil.rmtree(session.session_dir, ignore_errors=True)
+
+    async def _terminate_worker(
+        self,
+        process: Process,
+        worker_pid: int | None,
+        worker_create_time: int | None,
+    ) -> None:
+        if self._process_terminator is terminate_process_group:
+            await terminate_process_group(
+                process,
+                worker_pid=worker_pid,
+                worker_create_time=worker_create_time,
+            )
+        else:
+            await self._process_terminator(process)
 
     def _command(
         self,
@@ -443,9 +871,11 @@ class WorkerLauncher:
         data_dir: Path,
         plugins_dir: Path,
         input_path: Path,
+        *,
+        java_command: str | None = None,
     ) -> list[str]:
         return [
-            self._config.java_command,
+            java_command or self._config.java_command,
             *self._config.worker_jvm_options,
             f"-Drecaf.mcp.port={port}",
             f"-Drecaf.mcp.input_path={input_path}",
@@ -466,6 +896,7 @@ class WorkerLauncher:
         token: str,
         expected_input: Path,
         log_path: Path,
+        observed_worker: list[int | None],
     ) -> dict[str, Any]:
         deadline = time.monotonic() + self._config.launch_timeout_sec
         while time.monotonic() < deadline:
@@ -484,7 +915,18 @@ class WorkerLauncher:
                 await self._sleep(self._config.readiness_poll_sec)
                 continue
 
-            self._validate_health_identity(health, expected_input, process.pid)
+            worker_pid = self._validate_health_identity(
+                health,
+                expected_input,
+                process.pid,
+            )
+            if observed_worker[0] != worker_pid:
+                observed_worker[0] = worker_pid
+                observed_worker[1] = (
+                    windows_process_creation_time(worker_pid)
+                    if worker_pid != process.pid
+                    else None
+                )
             last_error = health.get("last_error")
             if last_error is not None:
                 message = str(last_error).replace(token, "<redacted>")[:500]
@@ -507,8 +949,9 @@ class WorkerLauncher:
         health: dict[str, Any],
         expected_input: Path,
         expected_pid: int,
-    ) -> None:
-        if health.get("pid") != expected_pid:
+    ) -> int:
+        worker_pid = resolve_worker_pid(health, expected_pid)
+        if worker_pid is None:
             raise WorkerLaunchError("Worker process identity mismatch")
         expected_path = str(expected_input)
         if health.get("expected_input_path") != expected_path:
@@ -536,6 +979,7 @@ class WorkerLauncher:
             and health.get("workspace_output_format") not in ("jar", "apk", "dex")
         ):
             raise WorkerLaunchError("Worker output format is missing or invalid")
+        return worker_pid
 
     @staticmethod
     def _startup_failure(log_path: Path) -> str | None:

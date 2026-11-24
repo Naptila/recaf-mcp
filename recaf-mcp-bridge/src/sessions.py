@@ -53,6 +53,13 @@ class Session:
     state: Literal["starting", "ready", "closing", "dead"] = "starting"
     output_format: str | None = "jar"
     dirty: bool = False
+    worker_pid: int | None = None
+    worker_create_time: int | None = None
+
+    @property
+    def effective_pid(self) -> int:
+        """Return the reported Worker JVM PID, falling back to the spawned handle PID."""
+        return self.worker_pid if self.worker_pid is not None else self.process.pid
 
 
 @dataclass(frozen=True, slots=True)

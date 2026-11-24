@@ -30,9 +30,12 @@ from launcher import (
     WorkerNotListening,
     WorkerPortCollision,
     allocate_loopback_port,
+    resolve_java_command,
+    resolve_worker_pid,
     start_worker_process,
     terminate_process_group,
     validate_recaf_runtime,
+    windows_process_creation_time,
 )
 from schema import INTERNAL_METHOD_NAMES
 from worker import WorkerRpcClient, WorkerRpcError
@@ -74,6 +77,11 @@ class SchemaWorkerDiscovery:
         probe_root.mkdir(mode=0o700)
         final_error: Exception | None = None
         try:
+            effective_java = (
+                await resolve_java_command(self._config.java_command, os.environ)
+                if self._process_starter is start_worker_process
+                else self._config.java_command
+            )
             for attempt in range(1, self._config.launch_attempts + 1):
                 attempt_root = probe_root / f"attempt-{attempt}"
                 data_dir = attempt_root / "data"
@@ -88,14 +96,26 @@ class SchemaWorkerDiscovery:
                 port = self._port_allocator()
                 token = secrets.token_urlsafe(32)
                 process: Process | None = None
+                observed_worker: list[int | None] = [None, None]
                 retry = False
                 try:
                     process = await self._process_starter(
-                        self._command(port, data_dir, plugins_dir),
+                        self._command(
+                            port,
+                            data_dir,
+                            plugins_dir,
+                            java_command=effective_java,
+                        ),
                         {**os.environ, "RECAF_MCP_TOKEN": token},
                         log_path,
                     )
-                    health = await self._wait_until_ready(process, port, token, log_path)
+                    health = await self._wait_until_ready(
+                        process,
+                        port,
+                        token,
+                        log_path,
+                        observed_worker,
+                    )
                     result = await self._rpc_client.request(
                         port,
                         token,
@@ -129,7 +149,11 @@ class SchemaWorkerDiscovery:
                 finally:
                     if process is not None:
                         with anyio.CancelScope(shield=True):
-                            await self._process_terminator(process)
+                            await self._terminate_worker(
+                                process,
+                                observed_worker[0],
+                                observed_worker[1],
+                            )
                 if not retry:
                     break
             raise WorkerLaunchError(
@@ -138,14 +162,31 @@ class SchemaWorkerDiscovery:
         finally:
             shutil.rmtree(probe_root, ignore_errors=True)
 
+    async def _terminate_worker(
+        self,
+        process: Process,
+        worker_pid: int | None,
+        worker_create_time: int | None,
+    ) -> None:
+        if self._process_terminator is terminate_process_group:
+            await terminate_process_group(
+                process,
+                worker_pid=worker_pid,
+                worker_create_time=worker_create_time,
+            )
+        else:
+            await self._process_terminator(process)
+
     def _command(
         self,
         port: int,
         data_dir: Path,
         plugins_dir: Path,
+        *,
+        java_command: str | None = None,
     ) -> list[str]:
         return [
-            self._config.java_command,
+            java_command or self._config.java_command,
             *self._config.worker_jvm_options,
             f"-Drecaf.mcp.port={port}",
             "-jar",
@@ -164,6 +205,7 @@ class SchemaWorkerDiscovery:
         port: int,
         token: str,
         log_path: Path,
+        observed_worker: list[int | None],
     ) -> dict[str, Any]:
         deadline = time.monotonic() + self._config.launch_timeout_sec
         while time.monotonic() < deadline:
@@ -180,8 +222,16 @@ class SchemaWorkerDiscovery:
             except WorkerNotListening:
                 await self._sleep(self._config.readiness_poll_sec)
                 continue
-            if health.get("pid") != process.pid:
+            worker_pid = resolve_worker_pid(health, process.pid)
+            if worker_pid is None:
                 raise WorkerLaunchError("schema-only Worker process mismatch")
+            if observed_worker[0] != worker_pid:
+                observed_worker[0] = worker_pid
+                observed_worker[1] = (
+                    windows_process_creation_time(worker_pid)
+                    if worker_pid != process.pid
+                    else None
+                )
             if health.get("expected_input_path") is not None:
                 raise WorkerLaunchError("schema-only Worker expected an input")
             if health.get("input_path") is not None:

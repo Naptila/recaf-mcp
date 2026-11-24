@@ -14,7 +14,14 @@ from typing import Any
 
 import anyio
 
-from launcher import HealthProbe, HttpHealthProbe, WorkerIdentity, validate_recaf_runtime
+from launcher import (
+    HealthProbe,
+    HttpHealthProbe,
+    WorkerIdentity,
+    resolve_worker_pid,
+    validate_recaf_runtime,
+    windows_process_creation_time,
+)
 from sessions import (
     PathReservationError,
     PathReservations,
@@ -29,7 +36,10 @@ ProcessStartReader = Callable[[int], str | None]
 
 
 def read_process_start_id(pid: int) -> str | None:
-    """Read Linux process start ticks so PID reuse can never authorize a signal."""
+    """Read OS process start identity so PID reuse can never authorize a signal."""
+    if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        created = windows_process_creation_time(pid)
+        return str(created) if created is not None else None
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
         closing_parenthesis = raw.rfind(")")
@@ -86,7 +96,7 @@ class RecoveredProcess:
         self.send_signal(signal.SIGTERM)
 
     def kill(self) -> None:
-        self.send_signal(signal.SIGKILL)
+        self.send_signal(getattr(signal, "SIGKILL", signal.SIGTERM))
 
     def send_signal(self, signal_number: int) -> None:
         if not self.verify_identity():
@@ -232,7 +242,8 @@ class RecoveryRegistry:
         health = await self._health_probe.probe(entry["port"], entry["token"])
         if self._process_start_reader(pid) != start_id:
             raise RuntimeError("recovery process changed during authentication")
-        if health.get("pid") != pid:
+        worker_pid = resolve_worker_pid(health, pid)
+        if worker_pid is None:
             raise RuntimeError("authenticated Worker PID mismatch")
         if health.get("plugin_build") != identity.plugin_build:
             raise RuntimeError("authenticated Worker build mismatch")
@@ -255,6 +266,11 @@ class RecoveryRegistry:
             raise RuntimeError("authenticated Worker is not recoverable")
 
         process = RecoveredProcess(pid, start_id, self._process_start_reader)
+        worker_create_time = (
+            windows_process_creation_time(worker_pid)
+            if worker_pid != pid
+            else None
+        )
         save_error = health.get("last_error")
         return Session(
             sid=entry["database"],
@@ -270,6 +286,8 @@ class RecoveryRegistry:
             idle_ttl_sec=entry["idle_ttl_sec"],
             output_format=health.get("workspace_output_format"),
             dirty=bool(entry.get("dirty", True)),
+            worker_pid=worker_pid,
+            worker_create_time=worker_create_time,
             save_error=(
                 str(save_error)[:1000]
                 if save_error is not None

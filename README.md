@@ -171,6 +171,8 @@ without `RECAF_MCP_TOKEN` leaves the plugin completely dormant.
 | `RECAF_AUTOSAVE_DIR` | XDG state | Owner-only directory for default managed autosaves (`~/.local/state/recaf-mcp/autosave`) |
 | `RECAF_RECOVERY_DIR` | XDG state | Owner-only registry for adopting Workers after failed shutdown saves |
 
+Windows package-manager Java shims (Scoop, Chocolatey, mise, jabba, etc.) on `PATH` are resolved to the underlying JDK binary automatically, while `RECAF_JAVA_COMMAND` remains available to select a specific JDK.
+
 ### Runtime & Memory Behavior
 
 - **Heap sizing & fast failure:** When `RECAF_WORKER_MAX_HEAP_MB` is unset, each

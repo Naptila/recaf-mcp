@@ -153,6 +153,8 @@ Bridge 会在 Recaf 插件目录中定位唯一的 `recaf-mcp-plugin*.jar`，并
 | `RECAF_AUTOSAVE_DIR` | XDG state 目录 | 默认托管自动保存目录（`~/.local/state/recaf-mcp/autosave`） |
 | `RECAF_RECOVERY_DIR` | XDG state 目录 | 仅当前用户可访问的异常退出恢复注册表目录 |
 
+Windows 包管理器生成的 `java` 垫片（Scoop、Chocolatey、mise、jabba 等）会自动解析为底层真实 JDK 可执行文件；如需指定特定 JDK，仍可显式设置 `RECAF_JAVA_COMMAND`。
+
 ### 运行时与内存策略
 
 - **堆大小与快速失败：** 未指定 `RECAF_WORKER_MAX_HEAP_MB` 时，Bridge 将每个 Worker 的

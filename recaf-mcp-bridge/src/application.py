@@ -175,7 +175,7 @@ class BridgeToolService:
                 instruction = await self._shutdown_bridge_session(session.sid)
             except BaseException as error:
                 instruction = (
-                    f"database={session.sid} pid={session.process.pid} "
+                    f"database={session.sid} pid={session.effective_pid} "
                     f"log={session.log_path}: shutdown cleanup failed: "
                     f"{str(error)[:500]}"
                 )
@@ -853,12 +853,12 @@ class BridgeToolService:
                 )
         except Exception as error:
             return (
-                f"database={claimed.sid} pid={claimed.process.pid} "
+                f"database={claimed.sid} pid={claimed.effective_pid} "
                 f"log={claimed.log_path}: {failure}; recovery metadata failed: "
                 f"{str(error)[:500]}"
             )
         return (
-            f"database={claimed.sid} pid={claimed.process.pid} "
+            f"database={claimed.sid} pid={claimed.effective_pid} "
             f"registry={registry_path} log={claimed.log_path}: {failure}. "
             "Restart the Bridge with the same recovery directory to authenticate "
             "and adopt this Worker."

@@ -64,6 +64,7 @@ MCP plugin:
 RECAF_JAR=/absolute/path/to/recaf.jar
 RECAF_PLUGIN_JAR=/optional/exact/recaf-mcp-plugin.jar
 RECAF_PLUGIN_DIR=/optional/plugin/discovery/directory
+RECAF_JAVA_COMMAND=java
 RECAF_MAX_SESSIONS=4
 # Optional fixed heap limit; omit to share 60% of JVM-visible RAM across slots.
 RECAF_WORKER_MAX_HEAP_MB=4096
@@ -109,11 +110,16 @@ and provisional autosaves are canonicalized and reserved before process
 creation; the default autosave extension is adjusted to the format detected
 by Recaf (`.jar`, `.apk`, or `.dex`). Pending launches count toward the session cap.
 
-The launcher does not use a shell. It gives every attempt a new loopback port,
+The launcher does not use a shell. Before discovery or session launches, it
+resolves `RECAF_JAVA_COMMAND` to `<java.home>/bin/java(.exe)` once per
+configured command (falling back cleanly to the original command on custom
+wrappers). It gives every attempt a new loopback port,
 random bearer token, isolated Recaf data directory, plugin directory, log, and
 process group. Authenticated readiness must match the expected input path,
+process identity (direct PID or bounded `ancestor_pids` wrapper chain),
 plugin build, schema fingerprint, fully opened workspace, and archive-export
-capability. Launch failures terminate the owned process group, release all
+capability. Launch failures terminate the owned process group or Windows
+process tree (including the reported Worker JVM PID), release all
 reservations, and expose only a bounded token-redacted log tail.
 
 ## Available session flow

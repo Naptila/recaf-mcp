@@ -87,8 +87,8 @@ JSON-RPC envelopes, notifications, and batches. Responses use
 
 Authenticated internal methods are:
 
-- `health`: process/build/schema/workspace identity, readiness, archive-export
-  capability, busy/closing state, and bounded last error;
+- `health`: process/ancestor-PID/build/schema/workspace identity, readiness,
+  archive-export capability, busy/closing state, and bounded last error;
 - `cancel_operation`: interrupt one exact Bridge-owned operation ID;
 - `save_workspace`: original-format JAR/APK/DEX export, format validation and
   atomic installation; APK output is unsigned;
@@ -321,7 +321,8 @@ never installs a partial destination.
 
 An analysis Worker is ready only when authenticated health reports
 `ready=true`, `workspace_open=true`, and `workspace_ready=true`; the canonical
-expected/input paths, process PID, plugin build, and schema fingerprint must
+expected/input paths, process PID (or bounded `ancestor_pids` chain), plugin
+build, and schema fingerprint must
 also match the Bridge's launch record. Health reports
 `workspace_archive_export_supported` and `workspace_output_format` (`jar`, `apk`,
 `dex`, or null for unsupported inputs).
