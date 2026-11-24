@@ -10,6 +10,7 @@ import me.naptila.recafmcp.mcp.McpTool;
 import me.naptila.recafmcp.mcp.util.ToolArguments;
 import me.naptila.recafmcp.mcp.util.ToolCancellation;
 import software.coley.recaf.info.AndroidClassInfo;
+import software.coley.recaf.info.FileInfo;
 import software.coley.recaf.info.JvmClassInfo;
 import software.coley.recaf.services.compile.CompilerDiagnostic;
 import software.coley.recaf.services.script.GenerateResult;
@@ -20,8 +21,10 @@ import software.coley.recaf.services.workspace.WorkspaceManager;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
 import software.coley.recaf.workspace.model.bundle.ClassBundle;
+import software.coley.recaf.workspace.model.bundle.FileBundle;
 import software.coley.recaf.workspace.model.bundle.JvmClassBundle;
 import software.coley.recaf.workspace.model.resource.ResourceAndroidClassListener;
+import software.coley.recaf.workspace.model.resource.ResourceFileListener;
 import software.coley.recaf.workspace.model.resource.ResourceJvmClassListener;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
@@ -189,6 +192,7 @@ public final class RunRecafScriptTool implements McpTool {
         for (WorkspaceResource observed : observedResources) {
             observed.addResourceJvmClassListener(tracker);
             observed.addResourceAndroidClassListener(tracker);
+            observed.addResourceFileListener(tracker);
         }
         CapturedExecution captured;
         RestorationOutcome restoration = new RestorationOutcome(false, false, null);
@@ -198,12 +202,15 @@ public final class RunRecafScriptTool implements McpTool {
             for (WorkspaceResource observed : observedResources) {
                 observed.removeResourceJvmClassListener(tracker);
                 observed.removeResourceAndroidClassListener(tracker);
+                observed.removeResourceFileListener(tracker);
             }
             restoration = restoreWorkspace(workspaceManager, workspace);
         }
         int dirtyAfter = WorkspaceInfoTool.countDirtyItems(primary);
         int removedAfter = WorkspaceInfoTool.countRemovedItems(primary);
-        boolean mutatedBundles = dirtyAfter > dirtyBefore || removedAfter > removedBefore;
+        boolean mutatedBundles = tracker.fileBundleMutated()
+                || dirtyAfter > dirtyBefore
+                || removedAfter > removedBefore;
         return new ScriptExecution(
                 captured.compileSuccess(),
                 captured.executed(),
@@ -790,8 +797,11 @@ public final class RunRecafScriptTool implements McpTool {
     private record RestorationOutcome(boolean changed, boolean restored, String error) {
     }
 
-    static final class ChangeTracker implements ResourceJvmClassListener, ResourceAndroidClassListener {
+    static final class ChangeTracker implements ResourceJvmClassListener,
+            ResourceAndroidClassListener, ResourceFileListener {
         private final Map<ClassBundle<?>, BundleChanges> bundles = new IdentityHashMap<>();
+        private final java.util.concurrent.atomic.AtomicBoolean fileMutated =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
 
         ChangeTracker(WorkspaceResource primary) {
             this(primary, ClassToolSupport.embeddedResources(primary));
@@ -852,6 +862,30 @@ public final class RunRecafScriptTool implements McpTool {
         @Override
         public void onRemoveClass(WorkspaceResource resource, AndroidClassBundle bundle, AndroidClassInfo value) {
             recordRemoval(bundle, value.getName());
+        }
+
+        @Override
+        public void onNewFile(WorkspaceResource resource, FileBundle bundle, FileInfo newValue) {
+            fileMutated.set(true);
+        }
+
+        @Override
+        public void onUpdateFile(WorkspaceResource resource,
+                                 FileBundle bundle,
+                                 FileInfo oldValue,
+                                 FileInfo newValue) {
+            fileMutated.set(true);
+        }
+
+        @Override
+        public void onRemoveFile(WorkspaceResource resource,
+                                 FileBundle bundle,
+                                 FileInfo removedValue) {
+            fileMutated.set(true);
+        }
+
+        boolean fileBundleMutated() {
+            return fileMutated.get();
         }
 
         private void recordNew(ClassBundle<?> bundle, String name) {
