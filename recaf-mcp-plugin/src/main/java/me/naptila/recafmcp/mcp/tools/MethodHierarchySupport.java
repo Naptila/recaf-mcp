@@ -79,7 +79,9 @@ final class MethodHierarchySupport {
                     conflictingOwners
             );
             return new Analysis(
-                    List.of(rootOwner.getName()),
+                    ownsPrimaryClass(primary, rootOwner.getName())
+                            ? List.of(rootOwner.getName())
+                            : List.of(),
                     Set.of(rootOwner.getName()),
                     List.copyOf(externalOverrides),
                     List.copyOf(conflictingOwners)
@@ -117,7 +119,10 @@ final class MethodHierarchySupport {
         }
 
         Set<String> primaryDeclaring = new TreeSet<>();
-        primaryDeclaring.add(rootOwner.getName());
+        if (ownsPrimaryClass(primary, rootOwner.getName())
+                && declaresInheritableMethod(rootVertex, oldName, descriptor)) {
+            primaryDeclaring.add(rootOwner.getName());
+        }
         Set<String> carrierNames = new LinkedHashSet<>();
         Set<String> externalOverrides = new TreeSet<>();
         Set<String> conflictingOwners = new TreeSet<>();
@@ -152,7 +157,7 @@ final class MethodHierarchySupport {
                     externalOverrides.add(parent.getName() + "." + oldName + descriptor);
                 }
                 if (!parent.getName().equals(rootOwner.getName())
-                        && declaresInheritableMethod(parent, newName, descriptor)
+                        && declaresNonPrivateMethod(parent, newName, descriptor)
                         && canInheritFromAncestor(parent, vertex, newName, descriptor)) {
                     conflictingOwners.add(parent.getName());
                 }
@@ -350,10 +355,10 @@ final class MethodHierarchySupport {
         return true;
     }
 
-    private static boolean canInheritFromAncestor(InheritanceVertex ancestor,
-                                                  InheritanceVertex descendant,
-                                                  String name,
-                                                  String descriptor) {
+    static boolean canInheritFromAncestor(InheritanceVertex ancestor,
+                                          InheritanceVertex descendant,
+                                          String name,
+                                          String descriptor) {
         ClassInfo ancInfo = ancestor.getValue();
         if (ancInfo == null) {
             return true;

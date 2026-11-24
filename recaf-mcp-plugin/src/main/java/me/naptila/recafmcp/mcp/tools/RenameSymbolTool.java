@@ -277,6 +277,10 @@ public final class RenameSymbolTool implements McpTool {
                 || summary.count(request.selection().scope()) == 0) {
             return error("Recaf mapping applier did not change any classes", request);
         }
+        String verificationError = verifyPostRename(workspace, request, resolution);
+        if (verificationError != null) {
+            return error(verificationError, request);
+        }
 
         EntryPointMetadataSupport.SyncResult manifestSync = syncManifestsForRename(
                 workspace,
@@ -286,7 +290,7 @@ public final class RenameSymbolTool implements McpTool {
         JsonObject structuredContent = targetMetadata(request);
         structuredContent.add(
                 "renamed_declarations",
-                renamedDeclarationsJson(workspace, request, summary, resolution)
+                renamedDeclarationsJson(request, summary, resolution)
         );
         MappingMutationSupport.addSummary(structuredContent, summary);
         EntryPointMetadataSupport.addSyncMetadata(structuredContent, manifestSync);
@@ -353,6 +357,8 @@ public final class RenameSymbolTool implements McpTool {
                         "owner and descriptor are not allowed for a class rename"
                 );
             }
+            name = ClassToolSupport.normalizeClassNameInput(name);
+            newName = ClassToolSupport.normalizeClassNameInput(newName);
             if (!isValidInternalClassName(name) || !isValidInternalClassName(newName)) {
                 throw new IllegalArgumentException(
                         "class names must be valid JVM internal names"
@@ -364,6 +370,10 @@ public final class RenameSymbolTool implements McpTool {
                         "owner and descriptor are required for a member rename"
                 );
             }
+            owner = ClassToolSupport.normalizeClassNameInput(owner);
+            name = ClassToolSupport.normalizeUnicodeInput(name);
+            descriptor = ClassToolSupport.normalizeUnicodeInput(descriptor);
+            newName = ClassToolSupport.normalizeUnicodeInput(newName);
             if (!isValidInternalClassName(owner)) {
                 throw new IllegalArgumentException("owner must be a valid JVM internal name");
             }
@@ -490,7 +500,9 @@ public final class RenameSymbolTool implements McpTool {
         }
         String resolvedMethodName = declaredMethod.getName();
         String resolvedDesc = declaredMethod.getDescriptor();
-        if (owner.getDeclaredMethod(resolvedNewName, resolvedDesc) != null) {
+        if (owner.getDeclaredMethod(resolvedNewName, resolvedDesc) != null
+                || findPrimaryClassInfos(resource, owner.getName()).stream()
+                        .anyMatch(info -> info.getDeclaredMethod(resolvedNewName, resolvedDesc) != null)) {
             return TargetResolution.error(
                     "target method name and descriptor already exist in owner class"
             );
@@ -523,6 +535,25 @@ public final class RenameSymbolTool implements McpTool {
                 resolvedNewName
         );
 
+        List<String> sameClassCollisions = new java.util.ArrayList<>();
+        for (String declOwner : hierarchy.primaryDeclaringOwners()) {
+            boolean collides = findPrimaryClassInfos(resource, declOwner).stream()
+                    .anyMatch(info -> info.getDeclaredMethod(resolvedNewName, resolvedDesc) != null);
+            if (collides) {
+                sameClassCollisions.add(declOwner);
+            }
+        }
+        if (!sameClassCollisions.isEmpty()) {
+            return TargetResolution.hierarchyConflictError(
+                    "renaming method family would create duplicate method "
+                            + resolvedNewName + resolvedDesc
+                            + " in declaring class(es): "
+                            + String.join(", ", sameClassCollisions)
+                            + " (cannot be bypassed with force=true)",
+                    sameClassCollisions
+            );
+        }
+
         if (!hierarchy.externalOverrides().isEmpty() && !request.force()) {
             return TargetResolution.externalOverrideError(
                     "method overrides or implements external/library declaration(s): "
@@ -554,8 +585,97 @@ public final class RenameSymbolTool implements McpTool {
         );
     }
 
-    private static JsonArray renamedDeclarationsJson(Workspace workspace,
-                                                     RenameRequest request,
+    private static List<ClassInfo> findPrimaryClassInfos(
+            software.coley.recaf.workspace.model.resource.WorkspaceResource primary,
+            String internalName) {
+        List<ClassInfo> infos = new java.util.ArrayList<>();
+        var jvm = primary.getJvmClassBundle().get(internalName);
+        if (jvm != null) {
+            infos.add(jvm);
+        }
+        for (var versioned : primary.getVersionedJvmClassBundles().values()) {
+            var vJvm = versioned.get(internalName);
+            if (vJvm != null) {
+                infos.add(vJvm);
+            }
+        }
+        for (var androidBundle : primary.getAndroidClassBundles().values()) {
+            var android = androidBundle.get(internalName);
+            if (android != null) {
+                infos.add(android);
+            }
+        }
+        return infos;
+    }
+
+    private static boolean hasDeclaredMember(ClassInfo info,
+                                             SymbolKind kind,
+                                             String name,
+                                             String descriptor) {
+        return kind == SymbolKind.FIELD
+                ? info.getDeclaredField(name, descriptor) != null
+                : info.getDeclaredMethod(name, descriptor) != null;
+    }
+
+    private static String findDuplicateMember(ClassInfo info, SymbolKind kind) {
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        var members = kind == SymbolKind.FIELD ? info.getFields() : info.getMethods();
+        for (var member : members) {
+            String key = member.getName() + member.getDescriptor();
+            if (!seen.add(key)) {
+                return key;
+            }
+        }
+        return null;
+    }
+
+    private static String verifyPostRename(Workspace workspace,
+                                           RenameRequest request,
+                                           TargetResolution resolution) {
+        var primary = workspace.getPrimaryResource();
+        if (request.kind() == SymbolKind.CLASS) {
+            if (findPrimaryClassInfos(primary, request.newName()).isEmpty()
+                    || !findPrimaryClassInfos(primary, request.name()).isEmpty()) {
+                return "rename incomplete: class " + request.name()
+                        + " was not replaced by " + request.newName() + " in primary resource";
+            }
+            return null;
+        }
+        List<String> plannedOwners = resolution.familyOwners().isEmpty()
+                ? List.of(request.owner())
+                : resolution.familyOwners();
+        List<String> unrenamedOwners = new java.util.ArrayList<>();
+        for (String declOwner : plannedOwners) {
+            List<ClassInfo> postInfos = findPrimaryClassInfos(primary, declOwner);
+            if (postInfos.isEmpty()) {
+                unrenamedOwners.add(declOwner);
+                continue;
+            }
+            for (ClassInfo postInfo : postInfos) {
+                String duplicate = findDuplicateMember(postInfo, request.kind());
+                if (duplicate != null) {
+                    return "rename produced duplicate " + request.kind().jsonName
+                            + " signature " + duplicate + " in " + declOwner;
+                }
+            }
+            boolean oldStillPresent = postInfos.stream().anyMatch(
+                    info -> hasDeclaredMember(info, request.kind(), request.name(), request.descriptor())
+            );
+            boolean newPresent = postInfos.stream().anyMatch(
+                    info -> hasDeclaredMember(info, request.kind(), request.newName(), request.descriptor())
+            );
+            if (oldStillPresent || !newPresent) {
+                unrenamedOwners.add(declOwner);
+            }
+        }
+        if (!unrenamedOwners.isEmpty()) {
+            return "rename incomplete: declaration(s) were not updated in primary resource: "
+                    + String.join(", ", unrenamedOwners);
+        }
+        return null;
+    }
+
+    private static JsonArray renamedDeclarationsJson(RenameRequest request,
                                                      MappingMutationSupport.Summary summary,
                                                      TargetResolution resolution) {
         JsonArray array = new JsonArray();
@@ -590,33 +710,7 @@ public final class RenameSymbolTool implements McpTool {
         List<String> plannedOwners = resolution.familyOwners().isEmpty()
                 ? List.of(request.owner())
                 : resolution.familyOwners();
-        var primary = workspace.getPrimaryResource();
-        List<String> verifiedOwners = new java.util.ArrayList<>();
         for (String declOwner : plannedOwners) {
-            List<ClassToolSupport.Entry> postEntries = ClassToolSupport.exact(
-                    primary,
-                    new ClassToolSupport.Selection(ClassToolSupport.Scope.ALL, null),
-                    declOwner
-            );
-            if (postEntries.isEmpty()) {
-                verifiedOwners.add(declOwner);
-                continue;
-            }
-            boolean renamedInBundle = postEntries.stream().anyMatch(entry -> {
-                ClassInfo postInfo = entry.classInfo();
-                if (request.kind() == SymbolKind.FIELD) {
-                    return postInfo.getDeclaredField(request.newName(), request.descriptor()) != null
-                            && postInfo.getDeclaredField(request.name(), request.descriptor()) == null;
-                }
-                return postInfo.getDeclaredMethod(request.newName(), request.descriptor()) != null
-                        && postInfo.getDeclaredMethod(request.name(), request.descriptor()) == null;
-            });
-            if (renamedInBundle) {
-                verifiedOwners.add(declOwner);
-            }
-        }
-        List<String> ownersToReport = verifiedOwners.isEmpty() ? plannedOwners : verifiedOwners;
-        for (String declOwner : ownersToReport) {
             JsonObject item = new JsonObject();
             item.addProperty("kind", request.kind().jsonName);
             item.addProperty("owner", declOwner);

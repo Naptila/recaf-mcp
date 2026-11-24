@@ -224,18 +224,21 @@ final class MappingMutationSupport {
                         continue;
                     }
                     ClassInfo ownerInfo = node.getValue();
-                    MethodMember declared = ownerInfo.getDeclaredMethod(
+                    ResolvedMethodDeclaration resolved = resolveInheritableMethodDeclaration(
+                            workspace,
+                            graph,
+                            ownerInfo,
                             method.getOldName(),
                             method.getDesc()
                     );
-                    if (declared == null || !MethodHierarchySupport.isInheritable(declared)) {
+                    if (resolved == null) {
                         continue;
                     }
                     MethodHierarchySupport.Analysis analysis = MethodHierarchySupport.analyze(
                             workspace,
                             graph,
-                            ownerInfo,
-                            declared,
+                            resolved.owner(),
+                            resolved.method(),
                             method.getNewName()
                     );
                     for (String declOwner : analysis.primaryDeclaringOwners()) {
@@ -259,15 +262,58 @@ final class MappingMutationSupport {
         return out;
     }
 
+    private record ResolvedMethodDeclaration(ClassInfo owner, MethodMember method) {
+    }
+
+    private static ResolvedMethodDeclaration resolveInheritableMethodDeclaration(
+            Workspace workspace,
+            InheritanceGraph graph,
+            ClassInfo ownerInfo,
+            String methodName,
+            String methodDesc) {
+        MethodMember direct = ownerInfo.getDeclaredMethod(methodName, methodDesc);
+        if (direct != null) {
+            return MethodHierarchySupport.isInheritable(direct)
+                    ? new ResolvedMethodDeclaration(ownerInfo, direct)
+                    : null;
+        }
+        var ownerVertex = graph.getVertex(ownerInfo.getName());
+        if (ownerVertex == null) {
+            return null;
+        }
+        for (var parent : ownerVertex.getAllParents()) {
+            if (parent == null || parent.getName() == null) {
+                continue;
+            }
+            ClassInfo parentInfo = parent.getValue();
+            if (parentInfo == null) {
+                var parentNode = workspace.findClass(parent.getName());
+                parentInfo = parentNode == null ? null : parentNode.getValue();
+            }
+            if (parentInfo == null) {
+                continue;
+            }
+            MethodMember inherited = parentInfo.getDeclaredMethod(methodName, methodDesc);
+            if (inherited != null
+                    && MethodHierarchySupport.isInheritable(inherited)
+                    && MethodHierarchySupport.canInheritFromAncestor(
+                            parent,
+                            ownerVertex,
+                            methodName,
+                            methodDesc
+                    )) {
+                return new ResolvedMethodDeclaration(parentInfo, inherited);
+            }
+        }
+        return null;
+    }
+
     static IntermediateMappings withIdentityOwnerClasses(IntermediateMappings source) {
         IntermediateMappings out = copyIntermediate(source);
         for (String owner : source.getFields().keySet()) {
             out.getClasses().putIfAbsent(owner, new ClassMapping(owner, owner));
         }
         for (String owner : source.getMethods().keySet()) {
-            out.getClasses().putIfAbsent(owner, new ClassMapping(owner, owner));
-        }
-        for (String owner : source.getVariables().keySet()) {
             out.getClasses().putIfAbsent(owner, new ClassMapping(owner, owner));
         }
         return out;

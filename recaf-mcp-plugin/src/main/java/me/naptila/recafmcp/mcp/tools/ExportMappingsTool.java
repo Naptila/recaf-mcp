@@ -136,6 +136,21 @@ public final class ExportMappingsTool implements McpTool {
                     null
             );
         }
+        if (CLASS_HEADER_REQUIRED_FORMATS.contains(
+                descriptor.name().toLowerCase(java.util.Locale.ROOT))
+                && counts.classes() == 0
+                && counts.fields() == 0
+                && counts.methods() == 0) {
+            return error(
+                    "the selected format (" + descriptor.name()
+                            + ") does not export local variable mappings, and no class, field, "
+                            + "or method mappings are present",
+                    request,
+                    descriptor,
+                    mappings,
+                    null
+            );
+        }
         if (mappings.isMissingFieldDescriptors()
                 && descriptor.fieldTypeDifferentiation()) {
             return error(
