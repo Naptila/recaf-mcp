@@ -145,6 +145,7 @@ public final class CallGraphTool implements McpTool {
 
         Workspace workspace = workspaceSupplier.get();
         WorkspaceResource primary = workspace.getPrimaryResource();
+        request = request.withSelection(ClassToolSupport.resolve(primary, request.selection()));
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 primary,
                 request.selection()
@@ -267,6 +268,9 @@ public final class CallGraphTool implements McpTool {
         ordered.subList(start, end).forEach(edge -> edges.add(toJson(edge)));
 
         JsonObject structured = requestMetadata(request);
+        structured.addProperty("owner", rootIdentity.owner());
+        structured.addProperty("name", rootIdentity.name());
+        structured.addProperty("descriptor", rootIdentity.descriptor());
         structured.add("root", methodJson(rootIdentity));
         structured.add("edges", edges);
         structured.addProperty("scope", outputScope);
@@ -1362,9 +1366,15 @@ public final class CallGraphTool implements McpTool {
                 false,
                 false
         );
-        String owner = ToolArguments.requiredString(arguments, "owner");
-        String name = ToolArguments.requiredString(arguments, "name");
-        String descriptor = ToolArguments.requiredString(arguments, "descriptor");
+        String owner = ClassToolSupport.normalizeClassNameInput(
+                ToolArguments.requiredString(arguments, "owner")
+        );
+        String name = ClassToolSupport.normalizeUnicodeInput(
+                ToolArguments.requiredString(arguments, "name")
+        );
+        String descriptor = ClassToolSupport.normalizeUnicodeInput(
+                ToolArguments.requiredString(arguments, "descriptor")
+        );
         String directionName = ToolArguments.optionalString(arguments, "direction");
         Direction direction = Direction.fromJsonName(directionName == null ? "both" : directionName);
         String graphDexScope = ToolArguments.optionalString(arguments, "graph_dex_scope");
@@ -1478,7 +1488,7 @@ public final class CallGraphTool implements McpTool {
     private static JsonObject createInputSchema() {
         JsonObject properties = new JsonObject();
         properties.add("owner", stringProperty(
-                "Exact JVM or Android owner internal name."
+                "Exact JVM or Android owner class name (internal a/b/C or dotted a.b.C)."
         ));
         properties.add("name", stringProperty("Exact method name."));
         properties.add("descriptor", stringProperty("Exact JVM method descriptor."));
@@ -1577,6 +1587,20 @@ public final class CallGraphTool implements McpTool {
                         int limit,
                         ClassToolSupport.Selection selection,
                         String graphDexScope) {
+        private GraphRequest withSelection(ClassToolSupport.Selection resolved) {
+            return new GraphRequest(
+                    owner,
+                    name,
+                    descriptor,
+                    direction,
+                    maxDepth,
+                    stopAtExternal,
+                    offset,
+                    limit,
+                    resolved,
+                    graphDexScope
+            );
+        }
         GraphRequest(String owner,
                      String name,
                      String descriptor,

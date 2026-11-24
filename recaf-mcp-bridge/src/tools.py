@@ -55,12 +55,31 @@ LIFECYCLE_TOOLS = (
     ),
     types.Tool(
         name="recaf_save",
-        description="Atomically save a JAR, APK, or DEX in its original format. APK output is unsigned.",
+        description=(
+            "Atomically save a JAR, APK, or DEX in its original format. Omitting "
+            "output_path writes to the session's managed autosave_path and never "
+            "mutates input_path in place. APK output is unsigned."
+        ),
         inputSchema=_object_schema(
             {
                 "database": {"type": "string", "minLength": 1},
-                "output_path": {"type": "string"},
-                "overwrite": {"type": "boolean", "default": False},
+                "output_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional absolute destination path. If omitted, writes "
+                        "to the session's managed autosave_path (never mutates "
+                        "input_path in place)."
+                    ),
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Allow replacing an existing explicit output_path "
+                        "(never allows overwriting input_path)."
+                    ),
+                },
             },
             ["database"],
         ),
@@ -68,8 +87,9 @@ LIFECYCLE_TOOLS = (
     types.Tool(
         name="recaf_close",
         description=(
-            "Close a session; omitted save persists unsaved changes for supported "
-            "JAR/APK/DEX inputs. APK output is unsigned; use save=true to force "
+            "Close a session; omitted save persists unsaved (dirty) changes to "
+            "output_path or the session's managed autosave_path, never mutating "
+            "input_path in place. APK output is unsigned; use save=true to force "
             "export or save=false to discard."
         ),
         inputSchema=_object_schema(
@@ -78,11 +98,20 @@ LIFECYCLE_TOOLS = (
                 "save": {
                     "type": "boolean",
                     "description": (
-                        "Explicitly save or discard. Omit for format-aware "
-                        "default behavior."
+                        "Explicitly save (true) or discard (false). Omit to "
+                        "auto-save dirty JAR/APK/DEX sessions to output_path or "
+                        "managed autosave_path."
                     ),
                 },
-                "output_path": {"type": "string"},
+                "output_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional absolute destination path when saving on "
+                        "close. If omitted, writes to the session's managed "
+                        "autosave_path (never mutates input_path in place)."
+                    ),
+                },
             },
             ["database"],
         ),

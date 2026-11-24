@@ -187,7 +187,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             SearchToolSupport.validateRegex(filter, "filter");
         }
         Predicate<String> classMatcher = ClassToolSupport.classFilterMatcher(filter, regex);
-        ClassToolSupport.Selection selection = ClassToolSupport.parseSelection(arguments, true, true);
+        ClassToolSupport.Selection parsedSelection = ClassToolSupport.parseSelection(arguments, true, true);
         String requestedDecompiler = ToolArguments.optionalString(arguments, "decompiler");
         boolean includeInnerClasses = ToolArguments.bool(arguments, "include_inner_classes", false);
         int perClassTimeoutSec = ToolArguments.integer(
@@ -205,11 +205,16 @@ public final class ExportDecompiledSourcesTool implements McpTool {
                     requestedOutput,
                     filter,
                     regex,
-                    selection,
+                    parsedSelection,
                     requestedDecompiler
             );
         }
 
+        Workspace workspace = workspaceSupplier.get();
+        ClassToolSupport.Selection selection = ClassToolSupport.resolve(
+                workspace.getPrimaryResource(),
+                parsedSelection
+        );
         SelectedDecompiler decompiler = decompilerSelector.select(requestedDecompiler);
         if (decompiler == null) {
             JsonObject structured = errorMetadata(
@@ -227,7 +232,6 @@ public final class ExportDecompiledSourcesTool implements McpTool {
             );
         }
 
-        Workspace workspace = workspaceSupplier.get();
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 workspace.getPrimaryResource(),
                 selection
@@ -808,7 +812,7 @@ public final class ExportDecompiledSourcesTool implements McpTool {
         filter.addProperty("maxLength", MAX_FILTER_LENGTH);
         filter.addProperty(
                 "description",
-                "Internal class-name substring or package prefix."
+                "Class-name substring or package prefix (internal a/b/C or dotted a.b.C, or regex when regex=true)."
         );
         properties.add("filter", filter);
         JsonObject regex = new JsonObject();

@@ -293,9 +293,10 @@ Runtime errors retain their outer type/message and add `runtime_error_chain`
 the chain is complete; a depth limit or cycle sets
 `runtime_error_chain_truncated=true` instead.
 
-All class names use internal form. The Android-aware analysis tools expose
-`scope` (`jvm`, `android`, and `all` where a scan is meaningful) and optional
-`dex_name`; JVM is always the compatibility default. Every Android hit reports
+All class and owner selectors accept internal (`a/b/C`) or dotted (`a.b.C`) form.
+The Android-aware analysis tools expose `scope` (`auto`, `jvm`, `android`, and
+`all` where a scan is meaningful) and optional `dex_name`; `auto` is the default
+and selects `android` on APK/DEX workspaces and `jvm` otherwise. Every Android hit reports
 its DEX identity, so multi-DEX names remain unambiguous. Member operations use
 JVM-style descriptors for both class domains. Android source patching and JVM
 transformations remain unsupported. Symbol mapping mutates DEX trees in memory;

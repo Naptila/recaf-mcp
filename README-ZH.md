@@ -170,7 +170,7 @@ Bridge 会在 Recaf 插件目录中定位唯一的 `recaf-mcp-plugin*.jar`，并
 
 ## 工具速查
 
-生命周期工具不需要 `database`；其余所有工具均需传入 `recaf_open` 返回的 `database` ID。
+生命周期工具不需要 `database`；其余所有工具均需传入 `recaf_open` 返回的 `database` ID。所有类名/`owner` 参数同时支持内部斜杠形式（`a/b/C`）与点分形式（`a.b.C`），`scope` 默认 `"auto"`（在 APK/DEX 工作区自动选择 `"android"`，其余选择 `"jvm"`）。
 
 ### 会话生命周期
 
@@ -179,8 +179,8 @@ Bridge 会在 Recaf 插件目录中定位唯一的 `recaf-mcp-plugin*.jar`，并
 | `recaf_open` | 打开 JAR、APK、DEX、ZIP 或 `.class` | 启动前快速校验绝对路径与文件魔数；返回 `database`、`output_format`、`dirty=false`、托管 `autosave_path` 及重复打开提醒 `duplicate_input_sessions` |
 | `recaf_list` | 查看活动/启动中会话与槽位 | 报告容量、`dirty` 状态、剩余空闲时间与 `save_error`，不暴露令牌 |
 | `set_idle_ttl` | 修改单会话空闲超时 | `0` 禁用自动清理；更新后重置挂起的保存重试计时 |
-| `recaf_save` | 原子导出工作区 | 输出 `MANIFEST.MF` 置首 JAR（含 `jar_signature_status`）、`aligned_16k` 未签名 APK（含 `native_lib_alignment_status` 与 `rewritten_dex_entries`）或 DEX，遵循系统 umask 并拒绝覆盖原输入文件 |
-| `recaf_close` | 关闭 Worker 会话 | 默认仅在 `dirty=true`（或 `save=true`）时保存；传入 `save=false` 丢弃改动 |
+| `recaf_save` | 原子导出工作区 | 写入 `output_path` 或托管 `autosave_path`（绝不原地修改 `input_path`）：输出 `MANIFEST.MF` 置首 JAR（含 `jar_signature_status`）、`aligned_16k` 未签名 APK（含 `native_lib_alignment_status` 与 `rewritten_dex_entries`）或 DEX |
+| `recaf_close` | 关闭 Worker 会话 | 默认在 `dirty=true`（或 `save=true`）时保存至 `output_path` 或托管 `autosave_path`（不改动 `input_path`）；传入 `save=false` 丢弃改动 |
 
 ### 浏览与反编译
 

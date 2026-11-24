@@ -70,6 +70,7 @@ public final class SearchStructureTool implements McpTool {
             return McpTool.errorResult("workspace not open", error);
         }
         var primary = workspaceSupplier.get().getPrimaryResource();
+        selection = ClassToolSupport.resolve(primary, selection);
         JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
         if (selectionError != null) {
             return selectionError;

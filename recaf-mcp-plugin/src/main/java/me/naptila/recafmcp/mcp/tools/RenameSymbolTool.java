@@ -208,6 +208,9 @@ public final class RenameSymbolTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        request = request.withSelection(
+                ClassToolSupport.resolve(workspace.getPrimaryResource(), request.selection())
+        );
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 workspace.getPrimaryResource(),
                 request.selection()
@@ -809,13 +812,19 @@ public final class RenameSymbolTool implements McpTool {
         JsonObject owner = new JsonObject();
         owner.addProperty("type", "string");
         owner.addProperty("minLength", 1);
-        owner.addProperty("description", "Member owner's JVM internal class name.");
+        owner.addProperty(
+                "description",
+                "Member owner class name (internal a/b/C or dotted a.b.C)."
+        );
         properties.add("owner", owner);
 
         JsonObject name = new JsonObject();
         name.addProperty("type", "string");
         name.addProperty("minLength", 1);
-        name.addProperty("description", "Existing class internal name or member name.");
+        name.addProperty(
+                "description",
+                "Existing class name (internal a/b/C or dotted a.b.C) or member name."
+        );
         properties.add("name", name);
 
         JsonObject descriptor = new JsonObject();
@@ -827,7 +836,10 @@ public final class RenameSymbolTool implements McpTool {
         JsonObject newName = new JsonObject();
         newName.addProperty("type", "string");
         newName.addProperty("minLength", 1);
-        newName.addProperty("description", "New internal class name or unqualified member name.");
+        newName.addProperty(
+                "description",
+                "New class name (internal a/b/C or dotted a.b.C) or unqualified member name."
+        );
         properties.add("new_name", newName);
 
         JsonObject force = new JsonObject();
@@ -898,6 +910,20 @@ public final class RenameSymbolTool implements McpTool {
                       ClassToolSupport.Selection selection,
                       ClassToolSupport.Entry target) {
             this(kind, owner, name, descriptor, newName, force, selection, target, List.of());
+        }
+
+        private RenameRequest withSelection(ClassToolSupport.Selection resolved) {
+            return new RenameRequest(
+                    kind,
+                    owner,
+                    name,
+                    descriptor,
+                    newName,
+                    force,
+                    resolved,
+                    target,
+                    familyOwners
+            );
         }
 
         private RenameRequest withResolvedNames(String resolvedOwner,

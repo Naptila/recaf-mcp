@@ -88,6 +88,7 @@ public final class GetClassBytecodeTool implements McpTool {
 
         Workspace workspace = workspaceSupplier.get();
         var primary = workspace.getPrimaryResource();
+        selection = ClassToolSupport.resolve(primary, selection);
         JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
         if (selectionError != null) {
             return selectionError;
@@ -266,7 +267,10 @@ public final class GetClassBytecodeTool implements McpTool {
         JsonObject className = new JsonObject();
         className.addProperty("type", "string");
         className.addProperty("minLength", 1);
-        className.addProperty("description", "Exact primary JVM or Android internal class name.");
+        className.addProperty(
+                "description",
+                "Exact JVM or Android class name (internal a/b/C or dotted a.b.C)."
+        );
         JsonObject properties = new JsonObject();
         properties.add("class_name", className);
         JsonObject offset = new JsonObject();

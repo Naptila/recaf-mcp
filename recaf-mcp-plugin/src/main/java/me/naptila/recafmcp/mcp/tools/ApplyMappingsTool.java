@@ -139,6 +139,10 @@ public final class ApplyMappingsTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        if (!request.scopeExplicit()
+                && ClassToolSupport.isAndroidResource(workspace.getPrimaryResource())) {
+            request = request.withScope(ClassToolSupport.Scope.ANDROID);
+        }
 
         MappingFileFormat format = formatResolver.apply(descriptor.name());
         if (format == null) {
@@ -499,7 +503,8 @@ public final class ApplyMappingsTool implements McpTool {
             throw new IllegalArgumentException("mappings exceeds the maximum length");
         }
         String scopeValue = ToolArguments.optionalString(arguments, "scope");
-        ClassToolSupport.Scope scope = scopeValue == null
+        boolean scopeExplicit = scopeValue != null && !"auto".equals(scopeValue);
+        ClassToolSupport.Scope scope = !scopeExplicit
                 ? ClassToolSupport.Scope.JVM
                 : ClassToolSupport.Scope.from(scopeValue);
         boolean uniqueKeys = ToolArguments.bool(arguments, "unique_keys", false);
@@ -518,7 +523,7 @@ public final class ApplyMappingsTool implements McpTool {
                 1,
                 MAX_LIMIT
         );
-        return new Request(format, mappings, scope, uniqueKeys, dryRun, offset, limit);
+        return new Request(format, mappings, scope, scopeExplicit, uniqueKeys, dryRun, offset, limit);
     }
 
     private static JsonObject createInputSchema(
@@ -590,15 +595,40 @@ public final class ApplyMappingsTool implements McpTool {
     record Request(String format,
                    String mappings,
                    ClassToolSupport.Scope scope,
+                   boolean scopeExplicit,
                    boolean uniqueKeys,
                    boolean dryRun,
                    int offset,
                    int limit) {
+        Request(String format,
+                String mappings,
+                ClassToolSupport.Scope scope,
+                boolean uniqueKeys,
+                boolean dryRun,
+                int offset,
+                int limit) {
+            this(format, mappings, scope, true, uniqueKeys, dryRun, offset, limit);
+        }
+
         private Request withFormat(String canonicalFormat) {
             return new Request(
                     canonicalFormat,
                     mappings,
                     scope,
+                    scopeExplicit,
+                    uniqueKeys,
+                    dryRun,
+                    offset,
+                    limit
+            );
+        }
+
+        private Request withScope(ClassToolSupport.Scope resolvedScope) {
+            return new Request(
+                    format,
+                    mappings,
+                    resolvedScope,
+                    scopeExplicit,
                     uniqueKeys,
                     dryRun,
                     offset,

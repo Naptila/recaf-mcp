@@ -186,7 +186,8 @@ final class StructureQuerySupport {
         JsonObject schema = objectSchema(properties);
         schema.addProperty("minProperties", 1);
         schema.addProperty("description", "Class constraints are ANDed. Member arrays require distinct matching "
-                + "members; [] requires none. Names are exact unless regex=true. Opcodes use native numeric values.");
+                + "members; [] requires none. Names are exact unless regex=true (class name accepts internal a/b/C "
+                + "or dotted a.b.C). Opcodes use native numeric values.");
         return schema;
     }
 

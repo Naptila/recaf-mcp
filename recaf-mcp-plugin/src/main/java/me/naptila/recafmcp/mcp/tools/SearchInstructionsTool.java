@@ -180,6 +180,7 @@ public final class SearchInstructionsTool implements McpTool {
 
         Workspace workspace = workspaceSupplier.get();
         WorkspaceResource primary = workspace.getPrimaryResource();
+        selection = ClassToolSupport.resolve(primary, selection);
         JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
         if (selectionError != null) {
             return selectionError;
@@ -396,7 +397,7 @@ public final class SearchInstructionsTool implements McpTool {
         filter.addProperty("maxLength", MAX_FILTER_LENGTH);
         filter.addProperty(
                 "description",
-                "Internal class-name substring or package prefix."
+                "Class-name substring or package prefix (internal a/b/C or dotted a.b.C)."
         );
         JsonObject properties = schema.getAsJsonObject("properties");
         properties.add("filter", filter);

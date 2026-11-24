@@ -165,6 +165,8 @@ public final class SearchCodeTool implements McpTool {
             return McpTool.errorResult("workspace not open", error);
         }
 
+        Workspace workspace = workspaceSupplier.get();
+        selection = ClassToolSupport.resolve(workspace.getPrimaryResource(), selection);
         SelectedDecompiler decompiler = decompilerSelector.select(requestedDecompiler);
         if (decompiler == null) {
             JsonObject error = new JsonObject();
@@ -179,7 +181,6 @@ public final class SearchCodeTool implements McpTool {
             return McpTool.errorResult("requested JVM decompiler is not available", error);
         }
 
-        Workspace workspace = workspaceSupplier.get();
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 workspace.getPrimaryResource(),
                 selection
@@ -400,7 +401,7 @@ public final class SearchCodeTool implements McpTool {
         filter.addProperty("maxLength", MAX_FILTER_LENGTH);
         filter.addProperty(
                 "description",
-                "Class-name substring or package prefix applied before decompilation."
+                "Class-name substring or package prefix (internal a/b/C or dotted a.b.C) applied before decompilation."
         );
         schema.getAsJsonObject("properties").add("filter", filter);
         schema.getAsJsonObject("properties").add(

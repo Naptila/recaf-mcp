@@ -77,6 +77,7 @@ public final class ListClassesTool implements McpTool {
         }
 
         WorkspaceResource primary = workspaceSupplier.get().getPrimaryResource();
+        selection = ClassToolSupport.resolve(primary, selection);
         JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
         if (selectionError != null) {
             return selectionError;
@@ -142,7 +143,10 @@ public final class ListClassesTool implements McpTool {
         JsonObject filter = new JsonObject();
         filter.addProperty("type", "string");
         filter.addProperty("minLength", 1);
-        filter.addProperty("description", "Optional case-sensitive internal-name substring.");
+        filter.addProperty(
+                "description",
+                "Optional case-sensitive class-name substring (internal a/b/C or dotted a.b.C)."
+        );
         properties.add("filter", filter);
         JsonObject offset = new JsonObject();
         offset.addProperty("type", "integer");

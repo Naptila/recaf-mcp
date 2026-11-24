@@ -205,7 +205,9 @@ without `RECAF_MCP_TOKEN` leaves the plugin completely dormant.
 ## Tool Reference
 
 Lifecycle tools omit `database`; all Worker tools require the `database` ID
-returned by `recaf_open`.
+returned by `recaf_open`. Class/owner selectors accept both internal (`a/b/C`)
+and dotted (`a.b.C`) names, and `scope` defaults to `"auto"` (`"android"` on
+APK/DEX workspaces, `"jvm"` otherwise).
 
 ### Session Lifecycle
 
@@ -214,8 +216,8 @@ returned by `recaf_open`.
 | `recaf_open` | Open a JAR, APK, DEX, ZIP, or `.class` | Pre-validates absolute path & magic bytes; returns `database`, `output_format`, `dirty=false`, managed `autosave_path`, and `duplicate_input_sessions` warning if already open |
 | `recaf_list` | Inspect active/starting sessions | Reports slot usage, `dirty`, idle countdowns, and `save_error` without tokens |
 | `set_idle_ttl` | Adjust per-session idle timeout | `0` disables idle expiration; updates reset pending retry timers |
-| `recaf_save` | Export workspace atomically | Writes manifest-first JAR (`jar_signature_status`), `aligned_16k` unsigned APK (`native_lib_alignment_status`, `rewritten_dex_entries`), or DEX, respecting OS umask and rejecting original-input aliases |
-| `recaf_close` | Close a Worker session | Saves when `dirty=true` (or `save=true`); pass `save=false` to discard |
+| `recaf_save` | Export workspace atomically | Writes to `output_path` or managed `autosave_path` (never mutates `input_path` in place): manifest-first JAR (`jar_signature_status`), `aligned_16k` unsigned APK (`native_lib_alignment_status`, `rewritten_dex_entries`), or DEX |
+| `recaf_close` | Close a Worker session | Saves when `dirty=true` (or `save=true`) to `output_path` or managed `autosave_path` without mutating `input_path`; pass `save=false` to discard |
 
 ### Browse & Decompile
 

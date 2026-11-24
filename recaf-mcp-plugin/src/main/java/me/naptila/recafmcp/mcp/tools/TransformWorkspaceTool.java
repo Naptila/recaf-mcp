@@ -234,7 +234,9 @@ public final class TransformWorkspaceTool implements McpTool {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
         List<TransformationPlanSupport.Phase> phases = TransformationPlanSupport.parse(arguments);
         List<String> transformers = phases.stream().flatMap(phase -> phase.transformers().stream()).distinct().toList();
-        String classPrefix = ToolArguments.optionalString(arguments, "class_prefix");
+        String classPrefix = ClassToolSupport.normalizeClassNameInput(
+                ToolArguments.optionalString(arguments, "class_prefix")
+        );
         int maxPasses = ToolArguments.integer(arguments, "max_passes", 1, 1, MAX_PASSES);
         boolean dryRun = ToolArguments.bool(arguments, "dry_run", false);
         int offset = ToolArguments.integer(arguments, "offset", 0, 0, Integer.MAX_VALUE);
@@ -444,7 +446,10 @@ public final class TransformWorkspaceTool implements McpTool {
         JsonObject prefix = new JsonObject();
         prefix.addProperty("type", "string");
         prefix.addProperty("minLength", 1);
-        prefix.addProperty("description", "Optional JVM internal-name prefix scope.");
+        prefix.addProperty(
+                "description",
+                "Optional JVM class-name prefix (internal a/b/ or dotted a.b.)."
+        );
         properties.add("class_prefix", prefix);
         properties.add("max_passes", integerProperty(1, MAX_PASSES, 1));
         properties.add("options", TransformationPlanSupport.optionsSchema());

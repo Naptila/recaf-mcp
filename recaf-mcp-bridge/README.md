@@ -433,8 +433,9 @@ Invalid regular expressions return a bounded parameter diagnostic naming the
 selector, Java regex failure, and character index instead of a generic
 `Invalid params` message.
 
-For all Android-aware tools, `scope` defaults to `jvm`; scan and bulk-export
-tools also accept `all`, while exact lookup tools accept `jvm` or `android`.
+For all Android-aware tools, `scope` defaults to `auto` (selecting `android` on
+APK/DEX workspaces and `jvm` otherwise); scan and bulk-export
+tools also accept `all`, while exact lookup tools accept `auto`, `jvm`, or `android`.
 `dex_name`
 such as `classes2.dex` is valid only with Android scope. Every Android result
 retains that identity, which avoids ambiguity when the same internal name is

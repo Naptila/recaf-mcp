@@ -89,6 +89,9 @@ public final class PatchInstructionsTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        request = request.withSelection(
+                ClassToolSupport.resolve(workspace.getPrimaryResource(), request.selection())
+        );
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 workspace.getPrimaryResource(),
                 request.selection()
@@ -527,7 +530,9 @@ public final class PatchInstructionsTool implements McpTool {
 
     private static Request parseRequest(JsonObject arguments) {
         ToolArguments.rejectUnknown(arguments, ARGUMENTS);
-        String owner = ToolArguments.requiredString(arguments, "owner");
+        String owner = ClassToolSupport.normalizeClassNameInput(
+                ToolArguments.requiredString(arguments, "owner")
+        );
         String name = ToolArguments.requiredString(arguments, "name");
         String descriptor = ToolArguments.requiredString(arguments, "descriptor");
         String assembly = ToolArguments.requiredString(arguments, "assembly");
@@ -577,7 +582,7 @@ public final class PatchInstructionsTool implements McpTool {
         ClassToolSupport.addScopeProperties(properties, false);
         properties.add("owner", stringProperty(
                 1_000,
-                "Exact primary JVM or Android internal owner name."
+                "Exact primary JVM or Android owner class name (internal a/b/C or dotted a.b.C)."
         ));
         properties.add("name", stringProperty(
                 1_000,
@@ -651,5 +656,17 @@ public final class PatchInstructionsTool implements McpTool {
                    boolean dryRun,
                    boolean allowUnverifiable,
                    ClassToolSupport.Selection selection) {
+        private Request withSelection(ClassToolSupport.Selection resolved) {
+            return new Request(
+                    owner,
+                    name,
+                    descriptor,
+                    assembly,
+                    expectedAssemblySha256,
+                    dryRun,
+                    allowUnverifiable,
+                    resolved
+            );
+        }
     }
 }

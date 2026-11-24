@@ -46,14 +46,19 @@ final class ClassToolSupport {
                                     boolean allowAll,
                                     boolean allowEmbeddedScan) {
         String value = ToolArguments.optionalString(arguments, SCOPE_ARGUMENT);
-        boolean scopeExplicit = value != null;
-        Scope scope = value == null ? Scope.JVM : Scope.from(value);
-        if (!allowAll && scope == Scope.ALL) {
-            throw new IllegalArgumentException("scope=all is not supported for exact class lookup");
-        }
+        boolean scopeExplicit = value != null && !"auto".equals(value);
         String dexName = ToolArguments.optionalString(arguments, DEX_NAME_ARGUMENT);
-        if (dexName != null && scope != Scope.ANDROID) {
-            throw new IllegalArgumentException("dex_name requires scope=android");
+        Scope scope;
+        if (!scopeExplicit) {
+            scope = dexName != null ? Scope.ANDROID : Scope.JVM;
+        } else {
+            scope = Scope.from(value);
+            if (!allowAll && scope == Scope.ALL) {
+                throw new IllegalArgumentException("scope=all is not supported for exact class lookup");
+            }
+            if (dexName != null && scope != Scope.ANDROID) {
+                throw new IllegalArgumentException("dex_name requires scope=android");
+            }
         }
         String resourcePath = arguments.has(RESOURCE_ARGUMENT)
                 ? ToolArguments.optionalString(arguments, RESOURCE_ARGUMENT)
@@ -67,6 +72,52 @@ final class ClassToolSupport {
             );
         }
         return new Selection(scope, dexName, scopeExplicit, resourcePath, includeEmbedded);
+    }
+
+    static Selection resolve(WorkspaceResource primary, Selection selection) {
+        if (selection.scopeExplicit() || primary == null) {
+            return selection;
+        }
+        Scope resolved = defaultScope(primary, selection);
+        if (resolved == selection.scope()) {
+            return selection;
+        }
+        return new Selection(
+                resolved,
+                selection.dexName(),
+                false,
+                selection.resourcePath(),
+                selection.includeEmbedded()
+        );
+    }
+
+    static Scope defaultScope(WorkspaceResource primary, Selection selection) {
+        if (selection.dexName() != null) {
+            return Scope.ANDROID;
+        }
+        if (selection.resourcePath() != null) {
+            WorkspaceResource embedded = resolveEmbeddedResource(
+                    primary,
+                    selection.resourcePath()
+            );
+            if (embedded != null) {
+                return isAndroidResource(embedded) ? Scope.ANDROID : Scope.JVM;
+            }
+        }
+        return isAndroidResource(primary) ? Scope.ANDROID : Scope.JVM;
+    }
+
+    static boolean isAndroidResource(WorkspaceResource resource) {
+        if (resource instanceof me.naptila.recafmcp.mcp.android.AndroidInputResource) {
+            return true;
+        }
+        if (resource instanceof WorkspaceFileResource fileResource
+                && (fileResource.getFileInfo() instanceof software.coley.recaf.info.ApkFileInfo
+                || fileResource.getFileInfo() instanceof software.coley.recaf.info.DexFileInfo)) {
+            return true;
+        }
+        return resource.getAndroidClassBundles().values().stream()
+                .anyMatch(bundle -> !bundle.isEmpty());
     }
 
     static List<ScopedResource> embeddedResources(WorkspaceResource primary) {
@@ -409,16 +460,18 @@ final class ClassToolSupport {
         JsonObject scope = new JsonObject();
         scope.addProperty("type", "string");
         JsonArray values = new JsonArray();
+        values.add("auto");
         values.add(Scope.JVM.value());
         values.add(Scope.ANDROID.value());
         if (allowAll) {
             values.add(Scope.ALL.value());
         }
         scope.add("enum", values);
-        scope.addProperty("default", Scope.JVM.value());
+        scope.addProperty("default", "auto");
         scope.addProperty(
                 "description",
-                "Class domain."
+                "Class domain: auto (default; selects android on APK/DEX workspaces and jvm otherwise), "
+                        + "jvm, or android" + (allowAll ? " (or all)." : ".")
         );
         properties.add(SCOPE_ARGUMENT, scope);
     }
@@ -480,6 +533,16 @@ final class ClassToolSupport {
                                 + " Android DEX classes; pass scope=\"android\" or scope=\"all\" to include them."
                 );
             }
+        } else if (!selection.scopeExplicit() && selection.scope() == Scope.ANDROID) {
+            int jvmCount = primary.getJvmClassBundle().size();
+            if (jvmCount > 0) {
+                target.addProperty("available_jvm_class_count", jvmCount);
+                target.addProperty(
+                        "scope_hint",
+                        "Workspace also contains " + jvmCount
+                                + " JVM class(es); pass scope=\"jvm\" or scope=\"all\" to inspect them."
+                );
+            }
         }
         if (!selection.includeEmbedded()
                 && primary.getJvmClassBundle().isEmpty()
@@ -514,6 +577,16 @@ final class ClassToolSupport {
                         "scope_hint",
                         "Workspace contains " + androidCount
                                 + " Android DEX classes; pass scope=\"android\" to target them."
+                );
+            }
+        } else if (!selection.scopeExplicit() && selection.scope() == Scope.ANDROID) {
+            int jvmCount = primary.getJvmClassBundle().size();
+            if (jvmCount > 0) {
+                target.addProperty("available_jvm_class_count", jvmCount);
+                target.addProperty(
+                        "scope_hint",
+                        "Workspace also contains " + jvmCount
+                                + " JVM class(es); pass scope=\"jvm\" to target them."
                 );
             }
         }

@@ -184,6 +184,7 @@ public final class DecompileClassTool implements McpTool {
         }
 
         Workspace workspace = workspaceSupplier.get();
+        selection = ClassToolSupport.resolve(workspace.getPrimaryResource(), selection);
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 workspace.getPrimaryResource(),
                 selection
@@ -655,7 +656,10 @@ public final class DecompileClassTool implements McpTool {
         JsonObject className = new JsonObject();
         className.addProperty("type", "string");
         className.addProperty("minLength", 1);
-        className.addProperty("description", "Exact JVM or Android internal class name, such as a/b/C.");
+        className.addProperty(
+                "description",
+                "Exact JVM or Android class name (internal a/b/C or dotted a.b.C)."
+        );
         properties.add("class_name", className);
         properties.add(
                 "decompiler",

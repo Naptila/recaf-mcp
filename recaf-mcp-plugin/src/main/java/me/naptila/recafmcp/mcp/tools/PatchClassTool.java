@@ -504,7 +504,10 @@ public final class PatchClassTool implements McpTool {
         JsonObject className = new JsonObject();
         className.addProperty("type", "string");
         className.addProperty("minLength", 1);
-        className.addProperty("description", "Exact primary JVM internal class name.");
+        className.addProperty(
+                "description",
+                "Exact primary JVM class name (internal a/b/C or dotted a.b.C)."
+        );
         JsonObject source = new JsonObject();
         source.addProperty("type", "string");
         source.addProperty("minLength", 1);

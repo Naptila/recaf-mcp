@@ -156,6 +156,7 @@ public final class SearchStringsTool implements McpTool {
         Workspace workspace = workspaceSupplier.get();
         WorkspaceResource primary = workspace == null ? null : workspace.getPrimaryResource();
         if (primary != null) {
+            selection = ClassToolSupport.resolve(primary, selection);
             JsonObject selectionError = ClassToolSupport.validateSelection(primary, selection);
             if (selectionError != null) {
                 return selectionError;
@@ -462,7 +463,7 @@ public final class SearchStringsTool implements McpTool {
         filter.addProperty("maxLength", MAX_FILTER_LENGTH);
         filter.addProperty(
                 "description",
-                "Class-name substring limiting scanned classes."
+                "Class-name substring (internal a/b/C or dotted a.b.C) limiting scanned classes."
         );
         schema.getAsJsonObject("properties").add("filter", filter);
         ClassToolSupport.addScopeProperties(

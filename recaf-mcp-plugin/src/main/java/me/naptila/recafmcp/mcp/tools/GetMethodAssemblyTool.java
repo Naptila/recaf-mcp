@@ -79,6 +79,7 @@ public final class GetMethodAssemblyTool implements McpTool {
 
         Workspace workspace = workspaceSupplier.get();
         var primary = workspace.getPrimaryResource();
+        request = request.withSelection(ClassToolSupport.resolve(primary, request.selection()));
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 primary,
                 request.selection()
@@ -357,7 +358,9 @@ public final class GetMethodAssemblyTool implements McpTool {
                 arguments,
                 false
         );
-        String owner = ToolArguments.requiredString(arguments, "owner");
+        String owner = ClassToolSupport.normalizeClassNameInput(
+                ToolArguments.requiredString(arguments, "owner")
+        );
         String name = ToolArguments.requiredString(arguments, "name");
         String descriptor = ToolArguments.requiredString(arguments, "descriptor");
         if (owner.length() > MAX_OWNER_LENGTH) {
@@ -376,7 +379,7 @@ public final class GetMethodAssemblyTool implements McpTool {
     private static JsonObject createInputSchema() {
         JsonObject owner = stringProperty(
                 MAX_OWNER_LENGTH,
-                "Exact primary JVM internal owner name."
+                "Exact JVM or Android owner class name (internal a/b/C or dotted a.b.C)."
         );
         JsonObject name = stringProperty(
                 MAX_MEMBER_NAME_LENGTH,
@@ -426,5 +429,8 @@ public final class GetMethodAssemblyTool implements McpTool {
                    String descriptor,
                    ClassToolSupport.Selection selection,
                    String ifSha256) {
+        private Request withSelection(ClassToolSupport.Selection resolved) {
+            return new Request(owner, name, descriptor, resolved, ifSha256);
+        }
     }
 }

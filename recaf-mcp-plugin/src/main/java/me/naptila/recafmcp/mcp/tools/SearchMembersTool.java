@@ -181,13 +181,16 @@ public final class SearchMembersTool implements McpTool {
 
     @Override
     public JsonObject execute(JsonObject arguments) {
-        SearchRequest request = parseRequest(arguments);
+        SearchRequest parsedRequest = parseRequest(arguments);
         if (!hasWorkspace.getAsBoolean()) {
-            return error("workspace not open", request);
+            return error("workspace not open", parsedRequest);
         }
 
         Workspace workspace = workspaceSupplier.get();
         WorkspaceResource primary = workspace.getPrimaryResource();
+        SearchRequest request = parsedRequest.withSelection(
+                ClassToolSupport.resolve(primary, parsedRequest.selection())
+        );
         JsonObject selectionError = ClassToolSupport.validateSelection(
                 primary,
                 request.selection()
@@ -788,7 +791,7 @@ public final class SearchMembersTool implements McpTool {
     private static JsonObject createInputSchema() {
         JsonObject properties = new JsonObject();
         properties.add("owner", selectorProperty(
-                "Declaring-class selector."
+                "Declaring-class selector (internal a/b/C or dotted a.b.C; or Java regex when regex=true)."
         ));
         properties.add("name", selectorProperty("Member-name selector."));
         properties.add("descriptor", selectorProperty(
@@ -829,7 +832,7 @@ public final class SearchMembersTool implements McpTool {
                 "both"
         ));
         JsonObject filter = selectorProperty(
-                "Class-name substring limiting scanned classes."
+                "Class-name substring (internal a/b/C or dotted a.b.C) limiting scanned classes."
         );
         filter.addProperty("maxLength", MAX_FILTER_LENGTH);
         properties.add("filter", filter);
@@ -891,6 +894,23 @@ public final class SearchMembersTool implements McpTool {
                          ClassToolSupport.Selection selection,
                          int offset,
                          int limit) {
+        private SearchRequest withSelection(ClassToolSupport.Selection resolved) {
+            return new SearchRequest(
+                    owner,
+                    name,
+                    descriptor,
+                    matchMode,
+                    descriptorMatchMode,
+                    regex,
+                    kind,
+                    results,
+                    filter,
+                    resolved,
+                    offset,
+                    limit
+            );
+        }
+
         SearchRequest(String owner,
                       String name,
                       String descriptor,
