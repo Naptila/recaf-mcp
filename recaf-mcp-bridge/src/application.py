@@ -224,6 +224,37 @@ class BridgeToolService:
 
     async def _open(self, arguments: dict[str, Any]) -> types.CallToolResult:
         assert self._launcher is not None
+        input_path = arguments.get("input_path")
+        if (
+            not isinstance(input_path, str)
+            or not input_path.strip()
+            or "\x00" in input_path
+        ):
+            return _error_result(
+                "input_path must be a non-empty string",
+                "invalid_params",
+            )
+        if not Path(input_path).expanduser().is_absolute():
+            return _error_result(
+                "input_path must be an absolute path",
+                "invalid_params",
+            )
+        autosave_path = arguments.get("autosave_path")
+        if autosave_path is not None:
+            if (
+                not isinstance(autosave_path, str)
+                or not autosave_path.strip()
+                or "\x00" in autosave_path
+            ):
+                return _error_result(
+                    "autosave_path must be a non-empty string",
+                    "invalid_params",
+                )
+            if not Path(autosave_path).expanduser().is_absolute():
+                return _error_result(
+                    "autosave_path must be an absolute path",
+                    "invalid_params",
+                )
         idle_ttl_sec = arguments.get("idle_ttl_sec")
         if idle_ttl_sec is not None and (
             isinstance(idle_ttl_sec, bool)
@@ -236,12 +267,10 @@ class BridgeToolService:
             )
         try:
             session = await self._launcher.launch(
-                arguments["input_path"],
-                arguments.get("autosave_path"),
+                input_path,
+                autosave_path,
                 idle_ttl_sec,
             )
-        except KeyError:
-            return _error_result("input_path is required", "invalid_params")
         except SessionCapacityError as error:
             now = time.monotonic()
             snapshot = await self._sessions.snapshot_state()
@@ -421,6 +450,37 @@ class BridgeToolService:
                 "output_path cannot be used when save is false",
                 "invalid_params",
             )
+        if session.state == "dead" or session.process.returncode is not None:
+            assert self._launcher is not None
+            was_dirty = session.dirty
+            with anyio.CancelScope(shield=True):
+                await self._launcher.abort(database)
+            if requested_save is True or arguments.get("output_path") is not None:
+                return _error_result(
+                    "Recaf Worker is no longer running; closed dead session without saving",
+                    "save_failed",
+                )
+            dead_warning = (
+                "Worker process was no longer running; unsaved in-memory changes could not be saved."
+                if was_dirty
+                else "Worker process was no longer running."
+            )
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text",
+                        text=f"Closed dead Recaf session {database} without saving.",
+                    )
+                ],
+                structuredContent={
+                    "database": database,
+                    "closed": True,
+                    "saved": False,
+                    "graceful": False,
+                    "warning": dead_warning,
+                },
+                isError=False,
+            )
         if save:
             return await self._save_and_close(database, arguments.get("output_path"))
         try:
@@ -470,13 +530,24 @@ class BridgeToolService:
                 "save_unsupported",
             )
         if not self._session_ready(session):
+            if not session.closing and (
+                session.state == "dead" or session.process.returncode is not None
+            ):
+                assert self._launcher is not None
+                with anyio.CancelScope(shield=True):
+                    await self._launcher.abort(database)
             return _error_result("Recaf session is not ready", "session_not_ready")
 
         session.busy_count += 1
         session.last_touched = time.monotonic()
+        abort_dead = False
         try:
             async with session.operation_lock:
                 if not self._session_ready(session):
+                    abort_dead = not session.closing and (
+                        session.state == "dead"
+                        or session.process.returncode is not None
+                    )
                     return _error_result(
                         "Recaf session is not ready",
                         "session_not_ready",
@@ -488,10 +559,17 @@ class BridgeToolService:
                         overwrite,
                     )
                 except (PathReservationError, SaveWorkspaceError) as error:
+                    abort_dead = (
+                        session.state == "dead"
+                        or session.process.returncode is not None
+                    )
                     return _error_result(str(error), "save_failed")
         finally:
             session.busy_count -= 1
             session.last_touched = time.monotonic()
+            if abort_dead and self._launcher is not None:
+                with anyio.CancelScope(shield=True):
+                    await self._launcher.abort(database)
         return self._save_result(session, saved)
 
     async def _save_and_close(
@@ -533,7 +611,11 @@ class BridgeToolService:
             session.busy_count -= 1
             session.last_touched = time.monotonic()
             with anyio.CancelScope(shield=True):
-                if saved is None:
+                if (
+                    saved is None
+                    and session.state != "dead"
+                    and session.process.returncode is None
+                ):
                     await self._sessions.cancel_close(database)
                 else:
                     await self._launcher.abort(database)

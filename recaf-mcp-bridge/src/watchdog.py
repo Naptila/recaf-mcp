@@ -63,6 +63,9 @@ class IdleWatchdog:
                 tasks.start_soon(self._inspect, session)
 
     async def _inspect(self, candidate: Session) -> None:
+        was_dead = (
+            candidate.state == "dead" or candidate.process.returncode is not None
+        )
         try:
             session = await self._sessions.begin_close(candidate.sid)
         except SessionStateError:
@@ -73,13 +76,24 @@ class IdleWatchdog:
         expired = False
         try:
             async with session.operation_lock:
+                if was_dead or session.process.returncode is not None:
+                    if session.closing and session.busy_count == 0:
+                        expired = True
+                    return
                 if not self._eligible_after_claim(session, self._clock()):
                     return
                 session.busy_count += 1
                 try:
                     await self._expire(session)
                 except Exception as error:
-                    self._record_failure(session, error)
+                    if (
+                        session.state == "dead"
+                        or session.process.returncode is not None
+                    ):
+                        session.save_error = str(error)[:1000]
+                        expired = True
+                    else:
+                        self._record_failure(session, error)
                 else:
                     session.save_error = None
                     session.save_failure_count = 0
@@ -101,6 +115,12 @@ class IdleWatchdog:
 
     @staticmethod
     def _eligible_before_claim(session: Session, now: float) -> bool:
+        if (
+            not session.closing
+            and session.busy_count == 0
+            and (session.state == "dead" or session.process.returncode is not None)
+        ):
+            return True
         return (
             session.state == "ready"
             and not session.closing

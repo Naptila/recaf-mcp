@@ -54,8 +54,7 @@ def _did_mutate_workspace(name: str, result: types.CallToolResult) -> bool:
         ):
             return True
         return (
-            not result.isError
-            and structured.get("executed") is True
+            structured.get("executed") is True
             and structured.get("save_required") is True
         )
     if result.isError:
@@ -116,6 +115,10 @@ class WorkerToolProxy:
         if session is None:
             return _proxy_error("unknown Recaf session", "unknown_database")
         if not self._is_ready(session):
+            if not session.closing and (
+                session.state == "dead" or session.process.returncode is not None
+            ):
+                await self._abort_unresponsive(session)
             return _proxy_error("Recaf session is not ready", "session_not_ready")
 
         session.busy_count += 1
@@ -183,10 +186,10 @@ class WorkerToolProxy:
                 return _proxy_error(str(error), error_type)
             return _proxy_error(str(error), "worker_tool_error")
         except WorkerProtocolError as error:
-            session.state = "dead"
+            await self._abort_unresponsive(session)
             return _proxy_error(str(error), "worker_protocol_error")
         except WorkerTransportError as error:
-            session.state = "dead"
+            await self._abort_unresponsive(session)
             return _proxy_error(str(error), "worker_transport_error")
         except WorkerRpcError as error:
             return _proxy_error(str(error), "worker_error")
@@ -209,7 +212,7 @@ class WorkerToolProxy:
             )
         except WorkerRpcError:
             if session.process.returncode is not None:
-                session.state = "dead"
+                await self._abort_unresponsive(session)
                 return
         await self._wait_until_worker_idle(session)
 
@@ -244,9 +247,10 @@ class WorkerToolProxy:
         await self._abort_unresponsive(session)
 
     async def _abort_unresponsive(self, session: Session) -> None:
-        session.state = "dead"
-        if self._abort_session is not None:
-            await self._abort_session(session.sid)
+        with anyio.CancelScope(shield=True):
+            session.state = "dead"
+            if self._abort_session is not None:
+                await self._abort_session(session.sid)
 
     @staticmethod
     def _is_ready(session: Session) -> bool:

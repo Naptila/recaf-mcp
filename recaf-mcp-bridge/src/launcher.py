@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import time
+import zipfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -220,10 +221,13 @@ def validate_supported_input_magic(input_path: Path) -> None:
         raise WorkerLaunchError("input file could not be read") from error
     if not prefix:
         raise WorkerLaunchError("input file is empty")
-    if not any(prefix.startswith(magic) for magic in _SUPPORTED_INPUT_MAGIC_PREFIXES):
-        raise WorkerLaunchError(
-            "input file is not a supported JAR, APK, DEX, ZIP, JMOD, or JVM class file"
-        )
+    if any(prefix.startswith(magic) for magic in _SUPPORTED_INPUT_MAGIC_PREFIXES):
+        return
+    if zipfile.is_zipfile(input_path):
+        return
+    raise WorkerLaunchError(
+        "input file is not a supported JAR, APK, DEX, ZIP, JMOD, or JVM class file"
+    )
 
 
 class WorkerLauncher:
